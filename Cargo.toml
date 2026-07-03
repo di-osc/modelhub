@@ -1,6 +1,6 @@
 [package]
 name = "modelhub"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/di-osc/modelhub"
@@ -15,6 +15,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
 tracing = "0.1"
+urlencoding = "2"
 
 [lints.rust]
 unsafe_code = "forbid"

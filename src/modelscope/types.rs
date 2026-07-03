@@ -26,10 +26,13 @@ pub struct RepoFile {
     #[serde(rename = "Path")]
     pub path: String,
     #[serde(rename = "Size")]
+    #[serde(default)]
     pub size: u64,
     #[serde(rename = "Sha256")]
+    #[serde(default)]
     #[allow(dead_code)]
-    pub sha256: String,
+    pub sha256: Option<String>,
     #[serde(rename = "Type")]
+    #[serde(default)]
     pub file_type: String,
 }
