@@ -26,9 +26,7 @@ fn partial_path_for(file_path: &Path) -> PathBuf {
 }
 
 fn file_is_complete(file_path: &Path, size: u64) -> bool {
-    fs::metadata(file_path)
-        .map(|meta| meta.len() == size)
-        .unwrap_or(false)
+    fs::metadata(file_path).is_ok_and(|meta| meta.len() == size)
 }
 
 async fn download_file(
