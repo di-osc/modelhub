@@ -1,2 +1,30 @@
 # modelhub
-hf-mirror，hf-hub，modelscope
+
+Rust helpers for downloading and caching models from model hubs. The current
+crate is `vasr-hub`, with `ModelScope` download support.
+
+## Usage
+
+```rust
+use vasr_hub::{cache_dir, modelscope};
+
+# async fn run() -> anyhow::Result<()> {
+modelscope::download_model("iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch", cache_dir()).await?;
+# Ok(())
+# }
+```
+
+Models are stored under `VASR_MODEL_DIR` when it is set. Otherwise the default
+cache root is `$HOME/.cache/vasr`.
+
+## Release
+
+The GitHub workflow in `.github/workflows/publish-crate.yml` publishes
+`vasr-hub` to crates.io.
+
+1. Add the `CARGO_REGISTRY_TOKEN` repository secret.
+2. Create the `crates-io` GitHub environment if environment approval is needed.
+3. Create and publish a GitHub release after updating the workspace version.
+
+The workflow can also be run manually with `dry_run` enabled to validate the
+package without publishing.
