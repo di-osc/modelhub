@@ -1,4 +1,4 @@
-//! Model cache and download helpers for vASR.
+//! Model cache and download helpers.
 
 mod cache;
 pub mod modelscope;

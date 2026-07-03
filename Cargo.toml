@@ -1,5 +1,5 @@
 [workspace]
-members = ["vasr-hub"]
+members = ["modelhub"]
 resolver = "2"
 
 [workspace.package]

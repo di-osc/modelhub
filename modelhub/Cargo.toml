@@ -1,10 +1,10 @@
 [package]
-name = "vasr-hub"
+name = "modelhub"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Model cache and download helpers for vASR"
+description = "Model cache and download helpers"
 
 [dependencies]
 anyhow = "1"

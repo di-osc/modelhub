@@ -16,7 +16,7 @@ permissions:
 
 jobs:
   publish:
-    name: Publish vasr-hub
+    name: Publish modelhub
     runs-on: ubuntu-latest
     environment: crates-io
 
@@ -34,14 +34,14 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Package
-        run: cargo package -p vasr-hub
+        run: cargo package -p modelhub
 
       - name: Publish dry run
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
-        run: cargo publish -p vasr-hub --dry-run
+        run: cargo publish -p modelhub --dry-run
 
       - name: Publish
         if: ${{ github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && !inputs.dry_run) }}
-        run: cargo publish -p vasr-hub --token "$CARGO_REGISTRY_TOKEN"
+        run: cargo publish -p modelhub --token "$CARGO_REGISTRY_TOKEN"
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
