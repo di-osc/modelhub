@@ -28,20 +28,20 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Check
-        run: cargo check --workspace --all-targets
+        run: cargo check --all-targets
 
       - name: Lint
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: Package
-        run: cargo package -p modelhub
+        run: cargo package
 
       - name: Publish dry run
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
-        run: cargo publish -p modelhub --dry-run
+        run: cargo publish --dry-run
 
       - name: Publish
         if: ${{ github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && !inputs.dry_run) }}
-        run: cargo publish -p modelhub --token "$CARGO_REGISTRY_TOKEN"
+        run: cargo publish --token "$CARGO_REGISTRY_TOKEN"
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
