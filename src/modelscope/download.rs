@@ -7,7 +7,7 @@ use super::client::{USER_AGENT, http_client};
 use super::types::{ModelScopeResponse, RepoFile};
 use anyhow::{Context, bail};
 use futures_util::StreamExt;
-use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use indicatif::{ProgressBar, ProgressStyle};
 use std::fs;
 use std::io::{BufWriter, Write};
 use std::path::{Component, Path, PathBuf};
@@ -18,9 +18,24 @@ const MODEL_FILES_URL: &str =
 const DATASET_FILES_URL: &str = "https://modelscope.cn/api/v1/datasets/<repo_id>/repo/tree?Recursive=True&Revision=<revision>&PageNumber=<page>&PageSize=<page_size>";
 const FILE_DOWNLOAD_URL: &str =
     "https://modelscope.cn/api/v1/<segment>/<repo_id>/repo?Revision=<revision>&FilePath=<path>";
-const BAR_STYLE: &str = "{msg:<30} {bar} {decimal_bytes:<10} / {decimal_total_bytes:<10} {decimal_bytes_per_sec:<12} {percent:<3}%  {eta_precise}";
+const BAR_STYLE: &str = "{spinner:.cyan} {msg} [{wide_bar:.cyan/blue}] {decimal_bytes}/{decimal_total_bytes} • {decimal_bytes_per_sec} • {eta}";
+const SPINNER_STYLE: &str = "{spinner:.cyan} {msg} • {decimal_bytes} • {decimal_bytes_per_sec}";
 const DEFAULT_REVISION: &str = "master";
+const DEFAULT_CONCURRENCY: usize = 4;
 const DATASET_PAGE_SIZE: usize = 200;
+
+fn compact_label(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let compact: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!(
+            "{}…",
+            compact.chars().take(max_chars - 1).collect::<String>()
+        )
+    } else {
+        compact
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RepoKind {
@@ -50,6 +65,18 @@ fn repo_cache_dir(cache_root: &Path, kind: RepoKind, repo_id: &str, revision: &s
         .join(repo_id.replace('/', "--"))
         .join("snapshots")
         .join(revision)
+}
+
+fn validate_revision(revision: &str) -> anyhow::Result<()> {
+    let path = Path::new(revision);
+    let mut components = path.components();
+    if revision.is_empty()
+        || !matches!(components.next(), Some(Component::Normal(_)))
+        || components.next().is_some()
+    {
+        bail!("revision must be a single path component: {revision}");
+    }
+    Ok(())
 }
 
 fn partial_path_for(file_path: &Path) -> PathBuf {
@@ -99,10 +126,32 @@ fn progress_bar(file_name: &str, size: Option<u64>) -> anyhow::Result<ProgressBa
     let bar = ProgressBar::new(size.unwrap_or(0));
     let style = ProgressStyle::default_bar().template(BAR_STYLE)?;
     bar.set_style(style);
-    bar.set_message(file_name.to_owned());
+    bar.set_message(compact_label(file_name, 32));
     if let Some(size) = size {
         bar.set_length(size);
     }
+    Ok(bar)
+}
+
+fn repo_progress(repo_id: &str, file_count: usize, total_size: u64) -> anyhow::Result<ProgressBar> {
+    let bar = if total_size > 0 {
+        let bar = ProgressBar::new(total_size);
+        bar.set_style(
+            ProgressStyle::default_bar()
+                .template(BAR_STYLE)?
+                .progress_chars("━━─"),
+        );
+        bar
+    } else {
+        let bar = ProgressBar::new_spinner();
+        bar.set_style(ProgressStyle::default_spinner().template(SPINNER_STYLE)?);
+        bar.enable_steady_tick(std::time::Duration::from_millis(100));
+        bar
+    };
+    bar.set_message(format!(
+        "{} • 0/{file_count} files",
+        compact_label(repo_id, 36)
+    ));
     Ok(bar)
 }
 
@@ -113,6 +162,7 @@ async fn download_to_path(
     file_name: &str,
     expected_size: Option<u64>,
     bar: ProgressBar,
+    manage_bar: bool,
 ) -> anyhow::Result<PathBuf> {
     if let Some(parent) = file_path.parent() {
         fs::create_dir_all(parent)?;
@@ -121,7 +171,9 @@ async fn download_to_path(
     if let Some(size) = expected_size
         && file_is_complete(file_path, size)
     {
-        bar.finish_and_clear();
+        if manage_bar {
+            bar.finish_and_clear();
+        }
         return Ok(file_path.to_path_buf());
     }
 
@@ -143,12 +195,16 @@ async fn download_to_path(
 
     let status = response.status();
     if !status.is_success() && status != reqwest::StatusCode::PARTIAL_CONTENT {
-        bar.abandon();
+        if manage_bar {
+            bar.abandon();
+        }
         bail!("failed to download file {file_name}: HTTP {status}");
     }
 
     let size = expected_size.or_else(|| response.content_length());
-    if let Some(size) = size {
+    if let Some(size) = size
+        && manage_bar
+    {
         bar.set_length(size);
     }
 
@@ -169,7 +225,9 @@ async fn download_to_path(
         && written != size
     {
         let _ = fs::remove_file(&part_path);
-        bar.abandon();
+        if manage_bar {
+            bar.abandon();
+        }
         bail!("incomplete download for {file_name}: expected {size} bytes, got {written} bytes");
     }
 
@@ -180,7 +238,9 @@ async fn download_to_path(
             file_path.display()
         )
     })?;
-    bar.finish();
+    if manage_bar {
+        bar.finish_and_clear();
+    }
     Ok(file_path.to_path_buf())
 }
 
@@ -198,7 +258,16 @@ async fn download_repo_file(
     let url = download_url(kind, &repo_id, &revision, &path);
     let file_name = repo_file.name;
     let expected_size = (repo_file.size > 0).then_some(repo_file.size);
-    download_to_path(client, &url, &file_path, &file_name, expected_size, bar).await
+    download_to_path(
+        client,
+        &url,
+        &file_path,
+        &file_name,
+        expected_size,
+        bar,
+        false,
+    )
+    .await
 }
 
 async fn list_repo_files(
@@ -227,6 +296,15 @@ async fn list_model_files(
         .data
         .context("ModelScope response did not include file data")?
         .files)
+}
+
+/// Check whether a model repository is available on `ModelScope` without downloading it.
+pub async fn model_exists(model_id: &str, revision: &str) -> anyhow::Result<bool> {
+    validate_revision(revision)?;
+    let client = http_client().await?;
+    list_model_files(&client, model_id, revision)
+        .await
+        .map(|_| true)
 }
 
 async fn list_dataset_files(
@@ -293,7 +371,12 @@ async fn download_repo_snapshot(
     repo_id: &str,
     revision: &str,
     save_dir: impl Into<PathBuf>,
+    concurrency: usize,
 ) -> anyhow::Result<PathBuf> {
+    validate_revision(revision)?;
+    if concurrency == 0 {
+        bail!("download concurrency must be at least 1");
+    }
     let save_dir = save_dir.into();
     fs::create_dir_all(&save_dir)?;
 
@@ -322,21 +405,17 @@ async fn download_repo_snapshot(
         return Ok(snapshot_dir);
     }
 
-    let bars = MultiProgress::new();
-    let mut tasks = Vec::new();
-
-    for repo_file in repo_files {
-        let bar = progress_bar(
-            &repo_file.name,
-            (repo_file.size > 0).then_some(repo_file.size),
-        )?;
-        bars.add(bar.clone());
-
+    let file_count = repo_files.len();
+    let total_size = repo_files.iter().map(|file| file.size).sum();
+    let progress = repo_progress(repo_id, file_count, total_size)?;
+    let progress_label = compact_label(repo_id, 36);
+    let mut downloads = futures_util::stream::iter(repo_files.into_iter().map(|repo_file| {
         let client = client.clone();
         let repo_id = repo_id.to_string();
         let revision = revision.to_string();
         let snapshot_dir = snapshot_dir.clone();
-        let task = tokio::spawn(async move {
+        let progress = progress.clone();
+        async move {
             download_repo_file(
                 client,
                 kind,
@@ -344,16 +423,23 @@ async fn download_repo_snapshot(
                 revision,
                 repo_file,
                 snapshot_dir,
-                bar,
+                progress,
             )
             .await
-        });
-        tasks.push(task);
+        }
+    }))
+    .buffer_unordered(concurrency);
+    let mut completed = 0usize;
+    while let Some(result) = downloads.next().await {
+        if let Err(error) = result {
+            progress.abandon_with_message(format!("{repo_id} • download failed"));
+            return Err(error);
+        }
+        completed += 1;
+        progress.set_message(format!("{progress_label} • {completed}/{file_count} files"));
     }
-
-    for task in tasks {
-        task.await??;
-    }
+    drop(downloads);
+    progress.finish_with_message(format!("✓ {repo_id} • {file_count} files"));
 
     tracing::info!(
         "Downloaded {} `{repo_id}@{revision}` to {}",
@@ -370,6 +456,7 @@ async fn download_single_file(
     revision: &str,
     save_dir: impl Into<PathBuf>,
 ) -> anyhow::Result<PathBuf> {
+    validate_revision(revision)?;
     let save_dir = save_dir.into();
     let snapshot_dir = repo_cache_dir(&save_dir, kind, repo_id, revision);
     let target = safe_repo_path(&snapshot_dir, file_path)?;
@@ -385,7 +472,7 @@ async fn download_single_file(
     let client = Arc::new(http_client().await?);
     let url = download_url(kind, repo_id, revision, file_path);
     let bar = progress_bar(file_name, None)?;
-    download_to_path(client, &url, &target, file_name, None, bar).await
+    download_to_path(client, &url, &target, file_name, None, bar, true).await
 }
 
 /// Download a model from `ModelScope` into `save_dir`.
@@ -407,7 +494,18 @@ pub async fn download_model_revision(
     revision: &str,
     save_dir: impl Into<PathBuf>,
 ) -> anyhow::Result<()> {
-    download_repo_snapshot(RepoKind::Model, model_id, revision, save_dir)
+    download_model_revision_with_concurrency(model_id, revision, save_dir, DEFAULT_CONCURRENCY)
+        .await
+}
+
+/// Download a model revision with a maximum number of concurrent file transfers.
+pub async fn download_model_revision_with_concurrency(
+    model_id: &str,
+    revision: &str,
+    save_dir: impl Into<PathBuf>,
+    concurrency: usize,
+) -> anyhow::Result<()> {
+    download_repo_snapshot(RepoKind::Model, model_id, revision, save_dir, concurrency)
         .await
         .map(|_| ())
 }
@@ -432,9 +530,15 @@ pub async fn download_dataset_revision(
     revision: &str,
     save_dir: impl Into<PathBuf>,
 ) -> anyhow::Result<()> {
-    download_repo_snapshot(RepoKind::Dataset, dataset_id, revision, save_dir)
-        .await
-        .map(|_| ())
+    download_repo_snapshot(
+        RepoKind::Dataset,
+        dataset_id,
+        revision,
+        save_dir,
+        DEFAULT_CONCURRENCY,
+    )
+    .await
+    .map(|_| ())
 }
 
 /// Download a single model file from the `master` revision.

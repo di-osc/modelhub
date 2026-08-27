@@ -1,6 +1,9 @@
 //! Model cache and download helpers.
 
+pub mod cache;
+pub mod huggingface;
 pub mod modelscope;
+pub mod unified;
 
 /// Backward-compatible alias for the `ModelScope` cache directory.
 pub use modelscope::{cache_dir, set_cache_dir};
