@@ -87,8 +87,12 @@ fn partial_path_for(file_path: &Path) -> PathBuf {
     file_path.with_file_name(format!("{name}.part"))
 }
 
+/// Returns whether `file_path` is a regular file whose length matches `size`.
+///
+/// Empty files (`size == 0`, e.g. `.gitkeep`) count as complete so a populated
+/// cache is not treated as missing on later runs.
 fn file_is_complete(file_path: &Path, size: u64) -> bool {
-    size > 0 && fs::metadata(file_path).is_ok_and(|meta| meta.len() == size)
+    fs::metadata(file_path).is_ok_and(|meta| meta.is_file() && meta.len() == size)
 }
 
 fn safe_repo_path(root: &Path, path: &str) -> anyhow::Result<PathBuf> {
@@ -577,4 +581,63 @@ pub async fn download_dataset_file_revision(
     save_dir: impl Into<PathBuf>,
 ) -> anyhow::Result<PathBuf> {
     download_single_file(RepoKind::Dataset, dataset_id, file_path, revision, save_dir).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::file_is_complete;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+    /// Create an isolated temp file, run `check`, then delete the directory.
+    fn with_temp_file(name: &str, bytes: &[u8], check: impl FnOnce(&Path)) {
+        let dir = std::env::temp_dir().join(format!(
+            "modelhub-file-is-complete-{}-{}",
+            std::process::id(),
+            TEMP_SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        fs::write(&path, bytes).unwrap();
+        check(&path);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn missing_file_is_not_complete() {
+        let path = PathBuf::from("/tmp/modelhub-missing-gitkeep-does-not-exist");
+        assert!(!file_is_complete(&path, 0));
+        assert!(!file_is_complete(&path, 16));
+    }
+
+    #[test]
+    fn empty_file_is_complete_when_size_is_zero() {
+        with_temp_file(".gitkeep", b"", |path| {
+            assert!(file_is_complete(path, 0));
+            assert!(!file_is_complete(path, 1));
+        });
+    }
+
+    #[test]
+    fn populated_file_matches_exact_length() {
+        with_temp_file("weights.bin", b"abcde", |path| {
+            assert!(file_is_complete(path, 5));
+            assert!(!file_is_complete(path, 0));
+            assert!(!file_is_complete(path, 4));
+        });
+    }
+
+    #[test]
+    fn directory_is_not_complete() {
+        let dir = std::env::temp_dir().join(format!(
+            "modelhub-file-is-complete-dir-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        assert!(!file_is_complete(&dir, 0));
+        let _ = fs::remove_dir_all(&dir);
+    }
 }
