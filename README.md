@@ -44,12 +44,33 @@ modelhub download org/model-name --all-backends
 ```bash
 modelhub list
 modelhub clear org/model-name
+modelhub clear org/model-name --all
+modelhub clear org/model-name --backend huggingface
 modelhub clear --all
+modelhub clear --all --backend modelscope
 ```
 
-`list` 会显示模型 ID、占用空间和缓存路径。`clear <model-id>` 只删除指定模型，
-`clear --all` 删除整个 modelhub 缓存。清理时会移除由 modelhub 创建、并指向统一缓存的
-后端符号链接；已存在的独立 ModelScope/Hugging Face 真实缓存目录会被保留。
+`list` 会扫描 modelhub 缓存，以及 ModelScope（`MODELSCOPE_CACHE` 或
+`$HOME/.cache/modelscope`）和 Hugging Face（`HUGGINGFACE_HUB_CACHE`、`HF_HOME` 或
+`$HOME/.cache/huggingface/hub`）的原生缓存，并用表格显示模型 ID、占用空间、所在后端和路径。家目录显示为 `~`。终端较窄时，过长的路径会在单元格里折行；同一模型有多份缓存时，路径在 `PATH` 列里各占一行：
+
+```text
+╭───────────┬─────────┬─────────────┬────────────╮
+│ MODEL     │    SIZE │ BACKENDS    │ PATH       │
+╞═══════════╪═════════╪═════════════╪════════════╡
+│ acme/demo │ 1.5 KiB │ huggingface │ /cache/hf  │
+├───────────┼─────────┼─────────────┼────────────┤
+│ org/name  │     2 B │ modelscope  │ /cache/ms  │
+│           │         │             │ /cache/ms2 │
+╰───────────┴─────────┴─────────────┴────────────╯
+```
+
+同一模型被多个后端链接到同一份文件时只计一次。`clear <model-id>` 默认只删除
+modelhub 缓存中的指定模型，并移除由 modelhub 创建、指向该缓存的后端符号链接。
+`clear <model-id> --all` 删除该模型在 modelhub、ModelScope 和 Hugging Face 中的副本。
+`--backend modelhub|modelscope|huggingface` 把删除范围限制到一个后端。
+不带模型 ID 的 `clear --all` 删除这些后端里的全部模型目录，数据集目录会保留。
+`clear --all --backend <name>` 只删除该后端的模型目录。
 
 命令会把下载内容统一保存到 `$HOME/.cache/modelhub`（可用 `MODELHUB_CACHE` 或
 `--cache-dir` 修改）。文件实体位于 `blobs/sha256/<digest>`，后端快照位于
