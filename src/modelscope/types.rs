@@ -5,12 +5,18 @@ pub struct ModelScopeResponse {
     #[serde(rename = "Code")]
     #[allow(dead_code)]
     pub code: i64,
-    #[serde(rename = "Success")]
+    // Dataset tree responses omit `Success`; treat a missing flag as success and
+    // rely on the `Data` payload and HTTP status.
+    #[serde(rename = "Success", default = "default_true")]
     pub success: bool,
-    #[serde(rename = "Message")]
+    #[serde(rename = "Message", default)]
     pub message: String,
     #[serde(rename = "Data")]
     pub data: Option<ModelScopeResponseData>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Deserialize)]
