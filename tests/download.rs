@@ -504,3 +504,29 @@ fn unsafe_whole_repo_revision_fails_before_any_request() {
     assert!(mock.requests().is_empty());
     fs::remove_dir_all(&root).unwrap();
 }
+
+#[test]
+fn unsafe_huggingface_manifest_revision_is_rejected() {
+    let root = temp_root("hf-bad-sha");
+    let mock = MockHub::start(vec![(
+        "/api/models/acme/demo/revision/main?blobs=true".to_owned(),
+        200,
+        br#"{"sha":"../../../evil","siblings":[{"rfilename":"config.json","size":7}]}"#.to_vec(),
+    )]);
+
+    with_hub(&mock, &root, || {
+        let mut options = DownloadOptions::new("acme/demo");
+        options.kind = Some(RepoKind::Model);
+        options.backend = Some(Backend::HuggingFace);
+        options.cache_root = root.join("cache");
+        assert!(run(&options).is_err());
+    });
+
+    // The unsafe manifest revision must never become a file request.
+    let requests = mock.requests();
+    assert!(
+        requests.iter().all(|path| !path.contains("evil")),
+        "{requests:?}"
+    );
+    fs::remove_dir_all(&root).unwrap();
+}

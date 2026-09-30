@@ -1021,6 +1021,7 @@ pub async fn download_repo(
     kind: Option<RepoKind>,
     backend: Option<Backend>,
 ) -> anyhow::Result<DownloadedRepo> {
+    validate_repo_value("repo id", repo_id)?;
     validate_repo_value("revision", huggingface_revision)?;
     validate_repo_value("revision", modelscope_revision)?;
     let hf_client = huggingface_client()?;
