@@ -25,7 +25,15 @@ modelhub download org/name README.md
 modelhub download org/name data/train.parquet
 ```
 
-单文件下载只写入 modelhub 缓存并打印落盘路径，不会链接到 ModelScope / Hugging Face 原生缓存（避免后端把不完整的快照当成整库）。
+单文件下载只请求这一个文件，不会列举整个仓库：命中缓存时直接返回本地路径，不做任何网络请求；未命中时只发这一个文件的请求（最多在 model / dataset 与 ModelScope / Hugging Face 的候选里并行探测，先成功者赢）。只写入 modelhub 缓存并打印落盘路径，不会链接到 ModelScope / Hugging Face 原生缓存（避免后端把不完整的快照当成整库）。
+
+已知仓库类型和后端时可以跳过探测：
+
+```bash
+modelhub download org/name data/train.parquet --repo-type dataset --backend modelscope
+```
+
+`--repo-type` 与 `--backend` 同样可以用于整仓下载：只传其一时，只探测剩下那一个维度；都传时完全不探测。两个参数都可省略。
 
 权重不一致时，默认只保留一份。`--all-backends` 会两边都留。
 
@@ -110,6 +118,9 @@ for entry in modelhub::list(&options)? {
 // 下载(需 async 运行时)
 let mut options = DownloadOptions::new("org/name");
 options.file = Some("README.md".to_owned());
+// 已知类型/后端时跳过探测；省略则自动识别
+options.kind = Some(modelhub::RepoKind::Dataset);
+options.backend = Some(modelhub::Backend::ModelScope);
 let downloaded = runtime.block_on(modelhub::download(&options))?;
 
 // 校验并为原生缓存生成清单

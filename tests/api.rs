@@ -93,4 +93,11 @@ fn async_operations_are_exported() {
     assert!(options.create);
     assert_eq!(options.kind, modelhub::RepoKind::Dataset);
     assert!(options.backends.is_empty());
+
+    let mut download = modelhub::DownloadOptions::new("acme/demo");
+    download.kind = Some(modelhub::RepoKind::Dataset);
+    download.backend = Some(modelhub::Backend::ModelScope);
+    assert_eq!(download.kind, Some(modelhub::RepoKind::Dataset));
+    assert_eq!(download.backend, Some(modelhub::Backend::ModelScope));
+    assert!(download.file.is_none());
 }

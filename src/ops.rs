@@ -7,7 +7,7 @@ use crate::repos::{
     CacheSource, CachedRepo, MODEL_ID_FILE, RepoHit, RepoKind, RepoStatus, discover, disk_size,
     modelhub_cached, sources, status,
 };
-use crate::unified::{DownloadedRepo, RepoManifest};
+use crate::unified::{Backend, DownloadedRepo, RepoManifest};
 use crate::upload::{
     UploadBackend, UploadOptions, UploadSummary, available_backends, collect_files,
 };
@@ -21,7 +21,15 @@ use std::path::{Path, PathBuf};
 pub struct DownloadOptions {
     pub repo_id: String,
     /// Optional single file to download; `None` downloads the whole repository.
+    ///
+    /// A single file is fetched with one request per candidate URL (`kind` ×
+    /// `backend` × endpoints, narrowed by the hints) and never lists the
+    /// repository.
     pub file: Option<String>,
+    /// Restrict the download to a model or a dataset; `None` auto-detects it.
+    pub kind: Option<RepoKind>,
+    /// Restrict the download to one backend; `None` uses every supported backend.
+    pub backend: Option<Backend>,
     /// Revision to request. Defaults to `main`/`master` per backend.
     pub revision: Option<String>,
     /// Root directory owned by modelhub.
@@ -41,6 +49,8 @@ impl DownloadOptions {
         Self {
             repo_id: repo_id.into(),
             file: None,
+            kind: None,
+            backend: None,
             revision: None,
             cache_root: crate::cache::cache_dir(),
             jobs: 4,
@@ -50,12 +60,26 @@ impl DownloadOptions {
     }
 }
 
-/// Download a repository and link it into the native backend caches.
+/// Download a repository or a single file.
 ///
-/// Auto-detects whether `repo_id` is a model or a dataset. A single-file
-/// download is stored in the modelhub cache only and is not linked.
+/// Auto-detects whether `repo_id` is a model or a dataset and which backends
+/// host it unless [`DownloadOptions::kind`] or [`DownloadOptions::backend`] say
+/// otherwise. A single-file download is stored in the modelhub cache only and
+/// is not linked into the native backend caches.
 pub async fn download(opts: &DownloadOptions) -> Result<DownloadedRepo> {
     fs::create_dir_all(&opts.cache_root)?;
+    if let Some(file) = opts.file.as_deref() {
+        return crate::unified::download_single_file(
+            opts.kind,
+            opts.backend,
+            &opts.repo_id,
+            opts.revision.as_deref(),
+            file,
+            &opts.cache_root,
+            opts.progress,
+        )
+        .await;
+    }
     let downloaded = crate::unified::download_repo(
         &opts.repo_id,
         opts.revision.as_deref().unwrap_or("main"),
@@ -63,20 +87,19 @@ pub async fn download(opts: &DownloadOptions) -> Result<DownloadedRepo> {
         &opts.cache_root,
         opts.jobs,
         opts.all_backends,
-        opts.file.as_deref(),
         opts.progress,
+        opts.kind,
+        opts.backend,
     )
     .await?;
-    if opts.file.is_none() {
-        if let Some(root) = downloaded.huggingface_root.as_deref() {
-            link_directory(
-                root,
-                &huggingface_cache_path(downloaded.kind, &opts.repo_id),
-            )?;
-        }
-        if let Some(root) = downloaded.modelscope_root.as_deref() {
-            link_directory(root, &modelscope_cache_path(downloaded.kind, &opts.repo_id))?;
-        }
+    if let Some(root) = downloaded.huggingface_root.as_deref() {
+        link_directory(
+            root,
+            &huggingface_cache_path(downloaded.kind, &opts.repo_id),
+        )?;
+    }
+    if let Some(root) = downloaded.modelscope_root.as_deref() {
+        link_directory(root, &modelscope_cache_path(downloaded.kind, &opts.repo_id))?;
     }
     Ok(downloaded)
 }
