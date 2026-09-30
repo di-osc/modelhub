@@ -310,22 +310,24 @@ git commit -m "Expose Backend and add single-file URL builders with ModelScope e
 
 ```rust
     #[test]
-    fn validate_relative_rejects_traversal_and_absolute_paths() {
-        assert!(validate_relative("file path", "data/a.mp3").is_ok());
-        assert!(validate_relative("revision", "refs/pr/1").is_ok());
-        assert!(validate_relative("file path", "../evil").is_err());
-        assert!(validate_relative("file path", "a/../../b").is_err());
-        assert!(validate_relative("file path", "/etc/passwd").is_err());
-        assert!(validate_relative("revision", "..").is_err());
-        assert!(validate_relative("revision", "/main").is_err());
-        assert!(validate_relative("file path", "").is_err());
+    fn validate_repo_value_rejects_traversal_and_absolute_paths() {
+        assert!(validate_repo_value("file path", "data/a.mp3").is_ok());
+        assert!(validate_repo_value("revision", "refs/pr/1").is_ok());
+        assert!(validate_repo_value("file path", "file..txt").is_ok());
+        assert!(validate_repo_value("file path", "./data/a.mp3").is_ok());
+        assert!(validate_repo_value("file path", "../evil").is_err());
+        assert!(validate_repo_value("file path", "a/../../b").is_err());
+        assert!(validate_repo_value("file path", "/etc/passwd").is_err());
+        assert!(validate_repo_value("revision", "..").is_err());
+        assert!(validate_repo_value("revision", "/main").is_err());
+        assert!(validate_repo_value("file path", "").is_err());
     }
 ```
 
 - [ ] **Step 2: 运行测试确认失败**
 
-Run: `cargo test --lib validate_relative`
-Expected: 编译失败，`cannot find function validate_relative`
+Run: `cargo test --lib validate_repo_value`
+Expected: 编译失败，`cannot find function validate_repo_value`
 
 - [ ] **Step 3: 实现校验**
 
@@ -335,8 +337,11 @@ Expected: 编译失败，`cannot find function validate_relative`
 /// Reject empty, absolute, or `..`-containing repository paths and revisions.
 ///
 /// Callers run this before any network request so a bad `file` or `revision`
-/// never reaches a hub.
-fn validate_relative(label: &str, value: &str) -> anyhow::Result<()> {
+/// never reaches a hub. Unlike `upload::validate_relative`, this is
+/// component-based: a name like `file..txt` is allowed, and a backslash is an
+/// ordinary character on Unix (Windows path prefixes are still rejected).
+#[allow(dead_code)] // first production caller lands in the next change
+fn validate_repo_value(label: &str, value: &str) -> anyhow::Result<()> {
     let path = Path::new(value);
     let invalid = value.is_empty()
         || path.is_absolute()
@@ -355,7 +360,7 @@ fn validate_relative(label: &str, value: &str) -> anyhow::Result<()> {
 
 - [ ] **Step 4: 运行测试确认通过**
 
-Run: `cargo test --lib validate_relative`
+Run: `cargo test --lib validate_repo_value`
 Expected: 1 passed
 
 - [ ] **Step 5: Commit**
@@ -397,7 +402,7 @@ async fn materialize(
             return Ok((cached, hash.clone(), git));
         }
     }
-    validate_relative("repository path", &remote.path)?;
+    validate_repo_value("repository path", &remote.path)?;
     let request = match remote.backend {
         Backend::HuggingFace => hf_auth(hf_client.get(&remote.url)),
         Backend::ModelScope => ms_client.get(&remote.url).header(
@@ -947,9 +952,9 @@ pub async fn download_single_file(
     cache_root: &Path,
     progress: bool,
 ) -> anyhow::Result<DownloadedRepo> {
-    validate_relative("file path", file)?;
+    validate_repo_value("file path", file)?;
     if let Some(revision) = revision {
-        validate_relative("revision", revision)?;
+        validate_repo_value("revision", revision)?;
     }
     let kinds = kind.map_or_else(|| vec![RepoKind::Model, RepoKind::Dataset], |kind| vec![kind]);
     let backends = backend.map_or_else(
