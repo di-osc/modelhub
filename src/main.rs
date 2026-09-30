@@ -22,7 +22,8 @@ enum Command {
         /// Model or dataset identifier, for example `org/name`. The kind is detected automatically.
         repo_id: String,
         /// Optional single file to download, for example `README.md` or `data/train.parquet`.
-        /// Without it the whole repository is downloaded.
+        /// Without it the whole repository is downloaded. A single file is fetched directly
+        /// without listing the repository.
         file: Option<String>,
         /// Revision to request. Defaults to `master` on `ModelScope` and `main` on Hugging Face.
         #[arg(short, long)]
@@ -493,7 +494,9 @@ fn main() -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, ListRow, human_size, render_model_table, shorten_home};
+    use super::{
+        Backend, Cli, Command, ListRow, RepoKind, human_size, render_model_table, shorten_home,
+    };
     use clap::Parser;
     use std::path::PathBuf;
 
@@ -606,33 +609,51 @@ mod tests {
 
     #[test]
     fn download_accepts_kind_and_backend_hints() {
-        assert!(
-            Cli::try_parse_from([
-                "modelhub",
-                "download",
-                "acme/demo",
-                "README.md",
-                "--repo-type",
-                "dataset",
-                "--backend",
-                "modelscope",
-            ])
-            .is_ok()
-        );
-        assert!(
-            Cli::try_parse_from(["modelhub", "download", "acme/demo", "--repo-type", "model"])
-                .is_ok()
-        );
-        assert!(
-            Cli::try_parse_from([
-                "modelhub",
-                "download",
-                "acme/demo",
-                "--backend",
-                "huggingface"
-            ])
-            .is_ok()
-        );
+        let cli = Cli::try_parse_from([
+            "modelhub",
+            "download",
+            "acme/demo",
+            "README.md",
+            "--repo-type",
+            "dataset",
+            "--backend",
+            "modelscope",
+        ])
+        .unwrap();
+        let Command::Download {
+            file,
+            repo_type,
+            backend,
+            ..
+        } = cli.command
+        else {
+            unreachable!("parsed the download subcommand")
+        };
+        assert_eq!(file.as_deref(), Some("README.md"));
+        assert_eq!(repo_type, Some(RepoKind::Dataset));
+        assert_eq!(backend, Some(Backend::ModelScope));
+
+        let cli = Cli::try_parse_from([
+            "modelhub",
+            "download",
+            "acme/demo",
+            "--backend",
+            "huggingface",
+        ])
+        .unwrap();
+        let Command::Download {
+            file,
+            repo_type,
+            backend,
+            ..
+        } = cli.command
+        else {
+            unreachable!("parsed the download subcommand")
+        };
+        assert_eq!(file, None);
+        assert_eq!(repo_type, None);
+        assert_eq!(backend, Some(Backend::HuggingFace));
+
         assert!(
             Cli::try_parse_from(["modelhub", "download", "acme/demo", "--backend", "modelhub"])
                 .is_err()
