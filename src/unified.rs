@@ -521,7 +521,6 @@ async fn modelscope_files_from_response(
 /// never reaches a hub. Unlike `upload::validate_relative`, this is
 /// component-based: a name like `file..txt` is allowed, and a backslash is an
 /// ordinary character on Unix (Windows path prefixes are still rejected).
-#[allow(dead_code)] // first production caller lands in the next change
 fn validate_repo_value(label: &str, value: &str) -> anyhow::Result<()> {
     let path = Path::new(value);
     let invalid = value.is_empty()
@@ -601,21 +600,7 @@ async fn materialize(
             return Ok((cached, hash.clone(), git));
         }
     }
-    let staging_target = safe_path(
-        &cache_root.join("staging").join(match remote.backend {
-            Backend::HuggingFace => "huggingface",
-            Backend::ModelScope => "modelscope",
-        }),
-        &remote.path,
-    )?;
-    let staging_name = staging_target
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("download");
-    let staging = staging_target.with_file_name(format!("{staging_name}.part"));
-    if let Some(parent) = staging.parent() {
-        fs::create_dir_all(parent)?;
-    }
+    validate_repo_value("repository path", &remote.path)?;
     let request = match remote.backend {
         Backend::HuggingFace => hf_auth(hf_client.get(&remote.url)),
         Backend::ModelScope => ms_client.get(&remote.url).header(
@@ -631,9 +616,48 @@ async fn materialize(
             response.status()
         );
     }
+    stream_to_blob(
+        remote.backend,
+        &remote.path,
+        response,
+        Some(remote),
+        cache_root,
+        progress,
+    )
+    .await
+}
+
+/// Stream a response into staging, verify it, and move it into the
+/// content-addressed blob store.
+///
+/// `expected` carries the manifest checks for a repository download. A
+/// single-file download passes `None` and relies on the response's
+/// `Content-Length` instead.
+async fn stream_to_blob(
+    backend: Backend,
+    path: &str,
+    response: reqwest::Response,
+    expected: Option<&RemoteFile>,
+    cache_root: &Path,
+    progress: &ProgressBar,
+) -> anyhow::Result<(PathBuf, String, String)> {
+    let declared = response.content_length().filter(|length| *length > 0);
+    let staging_target = safe_path(&cache_root.join("staging").join(backend.segment()), path)?;
+    let staging_name = staging_target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("download");
+    let staging = staging_target.with_file_name(format!("{staging_name}.part"));
+    if let Some(parent) = staging.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let expected_size = expected
+        .map(|remote| remote.size)
+        .filter(|size| *size > 0)
+        .or(declared);
     let mut sha256 = Sha256::new();
     let mut git = Sha1::new();
-    git.update(format!("blob {}\0", remote.size).as_bytes());
+    git.update(format!("blob {}\0", expected_size.unwrap_or(0)).as_bytes());
     let mut written = 0u64;
     {
         let mut writer = BufWriter::new(fs::File::create(&staging)?);
@@ -648,27 +672,25 @@ async fn materialize(
         }
         writer.flush()?;
     }
-    if remote.size > 0 && written != remote.size {
+    if let Some(size) = expected_size
+        && written != size
+    {
         let _ = fs::remove_file(&staging);
-        bail!("incomplete download for {}", remote.path);
+        bail!("incomplete download for {path}");
     }
     let sha256 = format!("{:x}", sha256.finalize());
     let git = format!("{:x}", git.finalize());
-    if remote
-        .sha256
-        .as_ref()
-        .is_some_and(|expected| expected != &sha256)
+    if let Some(expected) = expected.and_then(|remote| remote.sha256.as_deref())
+        && expected != sha256
     {
         let _ = fs::remove_file(&staging);
-        bail!("SHA-256 mismatch for {}", remote.path);
+        bail!("SHA-256 mismatch for {path}");
     }
-    if remote
-        .git_blob_id
-        .as_ref()
-        .is_some_and(|expected| expected != &git)
+    if let Some(expected) = expected.and_then(|remote| remote.git_blob_id.as_deref())
+        && expected != git
     {
         let _ = fs::remove_file(&staging);
-        bail!("Git blob hash mismatch for {}", remote.path);
+        bail!("Git blob hash mismatch for {path}");
     }
     let blob = cache_root.join("blobs").join("sha256").join(&sha256);
     if let Some(parent) = blob.parent() {
@@ -676,16 +698,14 @@ async fn materialize(
     }
     if blob.exists() {
         fs::remove_file(&staging)?;
-    } else {
+    } else if let Err(error) = fs::rename(&staging, &blob) {
         // Another concurrent file may have produced the same content-addressed
         // blob between the existence check and the rename. In that case the
         // already-complete blob wins and this staging file can be discarded.
-        if let Err(error) = fs::rename(&staging, &blob) {
-            if blob.exists() {
-                fs::remove_file(&staging)?;
-            } else {
-                return Err(error.into());
-            }
+        if blob.exists() {
+            fs::remove_file(&staging)?;
+        } else {
+            return Err(error.into());
         }
     }
     Ok((blob, sha256, git))
@@ -701,6 +721,22 @@ fn link_artifact(blob: &Path, target: &Path) -> anyhow::Result<()> {
     fs::hard_link(blob, target)
         .or_else(|_| fs::copy(blob, target).map(|_| ()))
         .with_context(|| format!("failed to materialize {}", target.display()))
+}
+
+/// Spinner shown while downloading, hidden when the caller disabled progress.
+fn progress_bar(enabled: bool, message: String) -> anyhow::Result<ProgressBar> {
+    let progress = if enabled {
+        ProgressBar::new_spinner()
+    } else {
+        ProgressBar::hidden()
+    };
+    progress.set_style(
+        ProgressStyle::default_spinner()
+            .template("{spinner:.cyan} {msg} • {decimal_bytes} • {decimal_bytes_per_sec}")?,
+    );
+    progress.set_message(message);
+    progress.enable_steady_tick(std::time::Duration::from_millis(100));
+    Ok(progress)
 }
 
 fn snapshot_root(model_root: &Path, backend: Backend, revision: &str) -> PathBuf {
@@ -922,17 +958,7 @@ async fn download_loaded(
     let ms_root = ms.as_ref().map(|_| repo_root.join("modelscope"));
     let hf_snapshot_revision = hf.as_ref().map(|manifest| manifest.revision.clone());
     let ms_snapshot_revision = ms.as_ref().map(|manifest| manifest.revision.clone());
-    let progress = if progress {
-        ProgressBar::new_spinner()
-    } else {
-        ProgressBar::hidden()
-    };
-    progress.set_style(
-        ProgressStyle::default_spinner()
-            .template("{spinner:.cyan} {msg} • {decimal_bytes} • {decimal_bytes_per_sec}")?,
-    );
-    progress.set_message(format!("{repo_id} • verifying and downloading"));
-    progress.enable_steady_tick(std::time::Duration::from_millis(100));
+    let progress = progress_bar(progress, format!("{repo_id} • verifying and downloading"))?;
     for (hf_file, ms_file) in git_comparisons {
         let (blob, sha256, git) =
             materialize(&ms_file, cache_root, hf_client, ms_client, &progress).await?;
