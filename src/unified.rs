@@ -776,6 +776,174 @@ fn add_separate(plans: &mut Vec<Artifact>, file: RemoteFile) {
     });
 }
 
+/// URLs to try for one file, one per endpoint of `backend`.
+fn single_file_urls(
+    backend: Backend,
+    kind: RepoKind,
+    repo_id: &str,
+    revision: &str,
+    file: &str,
+) -> Vec<String> {
+    match backend {
+        Backend::HuggingFace => hf_endpoints()
+            .into_iter()
+            .map(|endpoint| huggingface_file_url(&endpoint, kind, repo_id, revision, file))
+            .collect(),
+        Backend::ModelScope => {
+            vec![modelscope_file_url(
+                &ms_base_url(),
+                kind,
+                repo_id,
+                revision,
+                file,
+            )]
+        }
+    }
+}
+
+/// Assemble the result for a single-file download from the winning backend.
+fn single_file_result(
+    kind: RepoKind,
+    backend: Backend,
+    repo_root: PathBuf,
+    file: PathBuf,
+) -> DownloadedRepo {
+    let root = repo_root.join(backend.segment());
+    DownloadedRepo {
+        kind,
+        huggingface_root: (backend == Backend::HuggingFace).then_some(root.clone()),
+        modelscope_root: (backend == Backend::ModelScope).then_some(root),
+        repo_root,
+        file: Some(file),
+    }
+}
+
+/// Fire every candidate request and return the first successful response.
+///
+/// Dropping the remaining futures cancels their requests: a miss costs one
+/// failed request per candidate and never a repository listing.
+async fn send_first_success(
+    candidates: Vec<(RepoKind, Backend, String)>,
+    file: &str,
+    repo_id: &str,
+    hf_client: &reqwest::Client,
+    ms_client: &reqwest::Client,
+) -> anyhow::Result<(RepoKind, Backend, String, reqwest::Response)> {
+    let attempts = candidates.len().max(1);
+    let requests =
+        futures_util::stream::iter(candidates.into_iter().map(|(kind, backend, url)| {
+            let hf_client = hf_client.clone();
+            let ms_client = ms_client.clone();
+            async move {
+                let request = match backend {
+                    Backend::HuggingFace => hf_auth(hf_client.get(&url)),
+                    Backend::ModelScope => ms_client.get(&url).header(
+                        crate::modelscope::client::USER_AGENT.0,
+                        crate::modelscope::client::USER_AGENT.1,
+                    ),
+                };
+                let response = request
+                    .send()
+                    .await
+                    .map_err(|error| format!("{url}: {error}"))?;
+                if !response.status().is_success() {
+                    return Err(format!("{url}: HTTP {}", response.status()));
+                }
+                Ok((kind, backend, url, response))
+            }
+        }))
+        .buffer_unordered(attempts);
+    futures_util::pin_mut!(requests);
+    let mut errors = Vec::new();
+    while let Some(result) = requests.next().await {
+        match result {
+            Ok(winner) => return Ok(winner),
+            Err(error) => errors.push(error),
+        }
+    }
+    bail!(
+        "`{file}` was not found in `{repo_id}`; tried: {}",
+        errors.join("; ")
+    )
+}
+
+/// Download one repository file into the modelhub cache.
+///
+/// Never lists the repository: the cache is checked first, and a miss issues one
+/// request per candidate (`kind` × `backend`, narrowed by the hints). The first
+/// successful response wins and the remaining requests are cancelled. The file
+/// stays in the modelhub cache and is not linked into native backend caches.
+pub async fn download_single_file(
+    kind: Option<RepoKind>,
+    backend: Option<Backend>,
+    repo_id: &str,
+    revision: Option<&str>,
+    file: &str,
+    cache_root: &Path,
+    progress: bool,
+) -> anyhow::Result<DownloadedRepo> {
+    validate_repo_value("file path", file)?;
+    if let Some(revision) = revision {
+        validate_repo_value("revision", revision)?;
+    }
+    let kinds = kind.map_or_else(
+        || vec![RepoKind::Model, RepoKind::Dataset],
+        |kind| vec![kind],
+    );
+    let backends = backend.map_or_else(
+        || vec![Backend::HuggingFace, Backend::ModelScope],
+        |backend| vec![backend],
+    );
+    let repo_root = |kind: RepoKind| {
+        cache_root
+            .join(kind.segment())
+            .join(repo_id.replace('/', "--"))
+    };
+    for kind in &kinds {
+        for backend in &backends {
+            let revision =
+                revision.map_or_else(|| backend.default_revision().to_owned(), str::to_owned);
+            let target = safe_path(&snapshot_root(&repo_root(*kind), *backend, &revision), file)?;
+            if target.is_file() {
+                return Ok(single_file_result(
+                    *kind,
+                    *backend,
+                    repo_root(*kind),
+                    target,
+                ));
+            }
+        }
+    }
+    let mut candidates = Vec::new();
+    for kind in &kinds {
+        for backend in &backends {
+            let revision =
+                revision.map_or_else(|| backend.default_revision().to_owned(), str::to_owned);
+            for url in single_file_urls(*backend, *kind, repo_id, &revision, file) {
+                candidates.push((*kind, *backend, url));
+            }
+        }
+    }
+    let hf_client = huggingface_client()?;
+    let ms_client = crate::modelscope::client::http_client()?;
+    let progress = progress_bar(progress, format!("{repo_id} • downloading {file}"))?;
+    let (kind, backend, _, response) =
+        send_first_success(candidates, file, repo_id, &hf_client, &ms_client).await?;
+    let (blob, _, _) =
+        match stream_to_blob(backend, file, response, None, cache_root, &progress).await {
+            Ok(value) => value,
+            Err(error) => {
+                progress.abandon_with_message(format!("{repo_id} • download failed"));
+                return Err(error);
+            }
+        };
+    let revision = revision.map_or_else(|| backend.default_revision().to_owned(), str::to_owned);
+    let target = safe_path(&snapshot_root(&repo_root(kind), backend, &revision), file)?;
+    link_artifact(&blob, &target)?;
+    progress.finish_with_message(format!("✓ {repo_id} • downloaded {file}"));
+    Ok(single_file_result(kind, backend, repo_root(kind), target))
+}
+
 /// Download a repository, auto-detecting whether it is a model or a dataset.
 ///
 /// `file` selects a single repository file; `None` downloads the whole repo.
