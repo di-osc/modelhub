@@ -22,8 +22,9 @@ pub struct DownloadOptions {
     pub repo_id: String,
     /// Optional single file to download; `None` downloads the whole repository.
     ///
-    /// A single file is fetched with one request per candidate (`kind` ×
-    /// `backend`, narrowed by the hints) and never lists the repository.
+    /// A single file is fetched with one request per candidate URL (`kind` ×
+    /// `backend` × endpoints, narrowed by the hints) and never lists the
+    /// repository.
     pub file: Option<String>,
     /// Restrict the download to a model or a dataset; `None` auto-detects it.
     pub kind: Option<RepoKind>,
