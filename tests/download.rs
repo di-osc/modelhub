@@ -252,6 +252,8 @@ fn known_kind_and_backend_issue_exactly_one_request() {
         assert!(repo.join(".modelhub-layout").is_file());
         let blob = root.join("cache/blobs/sha256").join(sha256_hex(b"audio"));
         assert!(blob.is_file());
+        assert!(!root.join("ms-native/models/acme--demo").exists());
+        assert!(!root.join("hf-native/models--acme--demo").exists());
     });
 
     assert_eq!(mock.requests().len(), 1);
@@ -272,6 +274,9 @@ fn unsafe_paths_fail_before_any_request() {
         options.revision = Some("..".to_owned());
         assert!(run(&options).is_err());
         options.revision = Some("/main".to_owned());
+        assert!(run(&options).is_err());
+        let mut options = single_file_options(&root, "data/a.mp3");
+        options.repo_id = "../evil".to_owned();
         assert!(run(&options).is_err());
     });
 
@@ -477,5 +482,23 @@ fn whole_repo_ambiguous_kind_is_rejected() {
         assert!(error.contains("exists as both"), "{error}");
     });
 
+    fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn unsafe_whole_repo_revision_fails_before_any_request() {
+    let root = temp_root("whole-revision");
+    let mock = MockHub::start(Vec::new());
+
+    with_hub(&mock, &root, || {
+        let mut options = DownloadOptions::new("acme/demo");
+        options.kind = Some(RepoKind::Model);
+        options.backend = Some(Backend::ModelScope);
+        options.revision = Some("../../../escape".to_owned());
+        options.cache_root = root.join("cache");
+        assert!(run(&options).is_err());
+    });
+
+    assert!(mock.requests().is_empty());
     fs::remove_dir_all(&root).unwrap();
 }

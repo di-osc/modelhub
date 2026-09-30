@@ -11,12 +11,16 @@ use std::fs;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub use crate::repos::RepoKind;
 
 const HF_MIRROR: &str = "https://hf-mirror.com";
 const HF_OFFICIAL: &str = "https://huggingface.co";
 const DATASET_PAGE_SIZE: usize = 200;
+
+/// Distinguishes concurrent staging files for the same repository path.
+static STAGING_COUNTER: AtomicU64 = AtomicU64::new(0);
 const MS_OFFICIAL: &str = "https://modelscope.cn";
 
 /// Records the files a completed download expects, so completeness can be
@@ -368,7 +372,7 @@ fn modelscope_file_url(
     format!(
         "{base}/api/v1/{}/{}/repo?Revision={}&FilePath={}",
         kind.segment(),
-        repo_id,
+        encode_path(repo_id),
         urlencoding::encode(revision),
         urlencoding::encode(file)
     )
@@ -398,6 +402,7 @@ async fn huggingface_manifest(
         match hf_auth(client.get(url)).send().await {
             Ok(response) if response.status().is_success() => {
                 let info = response.json::<HfInfo>().await?;
+                validate_repo_value("revision", &info.sha)?;
                 let files = info
                     .siblings
                     .into_iter()
@@ -471,8 +476,9 @@ async fn modelscope_list_files(
     match kind {
         RepoKind::Model => {
             let url = format!(
-                "{}/api/v1/models/{repo_id}/repo/files?Recursive=true&Revision={}",
+                "{}/api/v1/models/{}/repo/files?Recursive=true&Revision={}",
                 ms_base_url(),
+                encode_path(repo_id),
                 urlencoding::encode(revision)
             );
             let response = client.get(url).send().await?;
@@ -482,8 +488,9 @@ async fn modelscope_list_files(
             let mut all = Vec::new();
             for page in 1usize.. {
                 let url = format!(
-                    "{}/api/v1/datasets/{repo_id}/repo/tree?Recursive=True&Revision={}&PageNumber={page}&PageSize={DATASET_PAGE_SIZE}",
+                    "{}/api/v1/datasets/{}/repo/tree?Recursive=True&Revision={}&PageNumber={page}&PageSize={DATASET_PAGE_SIZE}",
                     ms_base_url(),
+                    encode_path(repo_id),
                     urlencoding::encode(revision)
                 );
                 let response = client.get(url).send().await?;
@@ -664,7 +671,11 @@ async fn stream_to_blob(
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("download");
-    let staging = staging_target.with_file_name(format!("{staging_name}.part"));
+    let staging = staging_target.with_file_name(format!(
+        "{staging_name}.{}.{}.part",
+        std::process::id(),
+        STAGING_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
     if let Some(parent) = staging.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -1007,6 +1018,8 @@ pub async fn download_repo(
     kind: Option<RepoKind>,
     backend: Option<Backend>,
 ) -> anyhow::Result<DownloadedRepo> {
+    validate_repo_value("revision", huggingface_revision)?;
+    validate_repo_value("revision", modelscope_revision)?;
     let hf_client = huggingface_client()?;
     let ms_client = crate::modelscope::client::http_client()?;
     let (kind, hf, ms) = detect_manifests(
@@ -1177,9 +1190,7 @@ async fn download_loaded(
     let repo_root = cache_root
         .join(kind.segment())
         .join(repo_id.replace('/', "--"));
-    fs::create_dir_all(&repo_root)?;
-    fs::write(repo_root.join(".modelhub-model-id"), repo_id)?;
-    fs::write(repo_root.join(".modelhub-layout"), "cas-v1")?;
+    ensure_repo_markers(&repo_root, repo_id)?;
     let mut paths = BTreeSet::new();
     if let Some(manifest) = hf.as_ref() {
         paths.extend(manifest.files.keys().cloned());
@@ -1327,9 +1338,14 @@ async fn download_loaded(
     }
     progress.finish_with_message(format!("✓ {repo_id} • verified backend snapshots"));
     if let Some(manifest) = hf.as_ref() {
-        let refs = repo_root.join("huggingface").join("refs");
-        fs::create_dir_all(&refs)?;
-        fs::write(refs.join(huggingface_revision), &manifest.revision)?;
+        let reference = repo_root
+            .join("huggingface")
+            .join("refs")
+            .join(huggingface_revision);
+        if let Some(parent) = reference.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(reference, &manifest.revision)?;
     }
     write_repo_manifest(&repo_root, kind, hf.as_ref(), ms.as_ref())?;
     Ok(DownloadedRepo {
