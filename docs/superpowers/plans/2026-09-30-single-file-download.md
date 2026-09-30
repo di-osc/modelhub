@@ -1111,6 +1111,12 @@ git add Cargo.toml Cargo.lock tests/download.rs tests/api.rs src/unified.rs src/
 git commit -m "Download single files without listing the repository"
 ```
 
+> **执行补记（review 后落地，以代码为准）：**
+> - `download_single_file` 先校验 `repo_id`；命中路径会读取 HF 的本地 `refs/<revision>`（值需通过 `validate_repo_value`，否则忽略）以复用整仓的 `snapshots/<sha>`，零网络。
+> - 命中与未命中都调用 `ensure_repo_markers` 写 `.modelhub-model-id`/`.modelhub-layout`。
+> - 未命中分支包在 async 块里，成功 `finish`、任何失败 `abandon` 进度条。
+> - 集成测试增加：`cache_hit_via_huggingface_ref_skips_network`、`unsafe_huggingface_ref_is_ignored`（去掉 ref 校验后会失败），并在 known-hints 测试中断言标记文件；`tests/api.rs` 断言 `kind`/`backend` 赋值。
+
 ---
 
 ### Task 5: 整仓清单探测按 `kind`/`backend` 收窄

@@ -59,13 +59,14 @@ pub struct DownloadOptions {
 
 ### 单文件（`file: Some(...)`）
 
-1. **校验（任何请求之前）**：`file` 或 `revision` 含 `..` 组件或为绝对路径 → 立即
-   返回错误。复用/扩展 `safe_path` 的校验逻辑。
+1. **校验（任何请求之前）**：`repo_id`、`file`、以及 `revision`（若给出）含 `..` 组件或为绝对路径 → 立即返回错误。
 2. **缓存命中**：查候选快照路径
    `{cache}/{models|datasets}/{repo--id}/{huggingface|modelscope}/snapshots/{revision}/{file}`。
    `kind`/`backend` 已知则只查那一条；未知则查该维度全部候选。`revision` 缺省时按
    后端各自取 `main`（HF）/`master`（MS）。任一命中 → 直接 `Ok`，零网络。
-   快照目录使用请求的 revision 字符串（不做 commit sha 解析），否则离线命中做不到。
+   快照目录使用请求的 revision 字符串（不做联网的 commit sha 解析）。对 Hugging Face，
+   还会读取整仓下载写下的本地 `refs/<revision>`（内容为 commit sha，且必须是安全相对路径），
+   从而复用 `snapshots/<sha>` 里已有的文件——同样零网络。
 3. **未命中**：按已知维度收窄，并行对候选组合发单文件 GET（组合数 =
    `kind` 已知 ? 1 : 2 乘 `backend` 已知 ? 1 : 2，最多 4）。先成功者赢，其余立即取消。
    全部失败 → 报错并列出尝试过的 URL。
@@ -73,7 +74,8 @@ pub struct DownloadOptions {
    - Hugging Face：`{endpoint}/{repo_id}/resolve/{revision}/{file}`（dataset 加 `datasets/` 前缀；model 无前缀）。
      实现中同时修正了一个既有 bug：整仓清单构造的 HF 文件地址此前对 model 也加了 `models/` 前缀，会 404。
 4. **落盘**：走现有 `materialize` 管线：staging → `blobs/sha256/<hash>` →
-   hard-link 到快照路径。
+   hard-link 到快照路径。命中与未命中都会写入 `.modelhub-model-id` /
+   `.modelhub-layout` 标记（与整仓一致），使 `list`/`clear` 能识别该仓库。
 5. 不写 `.modelhub-manifest.json`，不链接任何原生缓存。
 
 注：并行候选下若多个组合存在同名文件，取先成功者赢；不复刻整仓路径"两类同时存在则
