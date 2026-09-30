@@ -880,7 +880,8 @@ fn ensure_repo_markers(repo_root: &Path, repo_id: &str) -> anyhow::Result<()> {
 /// A whole-repository Hugging Face download stores its snapshots under the
 /// resolved commit sha and records that sha in `refs/<revision>`. Consulting the
 /// local ref lets an existing repository download satisfy a single-file request
-/// without touching the network.
+/// without touching the network. A ref whose value is not a safe relative path
+/// is ignored.
 fn snapshot_revisions(repo_root: &Path, backend: Backend, revision: &str) -> Vec<String> {
     let mut revisions = vec![revision.to_owned()];
     if backend == Backend::HuggingFace
@@ -888,7 +889,10 @@ fn snapshot_revisions(repo_root: &Path, backend: Backend, revision: &str) -> Vec
             fs::read_to_string(repo_root.join("huggingface").join("refs").join(revision))
     {
         let sha = sha.trim();
-        if !sha.is_empty() && sha != revision {
+        if !sha.is_empty()
+            && sha != revision
+            && validate_repo_value("snapshot revision", sha).is_ok()
+        {
             revisions.push(sha.to_owned());
         }
     }
