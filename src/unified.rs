@@ -595,8 +595,9 @@ async fn materialize(
     if let Some(hash) = remote.sha256.as_ref() {
         let cached = cache_root.join("blobs").join("sha256").join(hash);
         if cached.is_file() {
-            progress.inc(fs::metadata(&cached)?.len());
-            let (_, git) = digest_file(&cached, remote.size)?;
+            let size = fs::metadata(&cached)?.len();
+            progress.inc(size);
+            let (_, git) = digest_file(&cached, size)?;
             return Ok((cached, hash.clone(), git));
         }
     }
@@ -627,12 +628,28 @@ async fn materialize(
     .await
 }
 
+/// Removes a staging file when dropped unless the download completed.
+struct StagingGuard {
+    path: PathBuf,
+    keep: bool,
+}
+
+impl Drop for StagingGuard {
+    fn drop(&mut self) {
+        if !self.keep {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
 /// Stream a response into staging, verify it, and move it into the
 /// content-addressed blob store.
 ///
 /// `expected` carries the manifest checks for a repository download. A
 /// single-file download passes `None` and relies on the response's
-/// `Content-Length` instead.
+/// `Content-Length` instead. When neither a manifest size nor `Content-Length`
+/// is available (for example a chunked response), the Git prelude falls back to
+/// zero and a Git blob comparison will not match.
 async fn stream_to_blob(
     backend: Backend,
     path: &str,
@@ -651,6 +668,10 @@ async fn stream_to_blob(
     if let Some(parent) = staging.parent() {
         fs::create_dir_all(parent)?;
     }
+    let mut guard = StagingGuard {
+        path: staging.clone(),
+        keep: false,
+    };
     let expected_size = expected
         .map(|remote| remote.size)
         .filter(|size| *size > 0)
@@ -675,7 +696,6 @@ async fn stream_to_blob(
     if let Some(size) = expected_size
         && written != size
     {
-        let _ = fs::remove_file(&staging);
         bail!("incomplete download for {path}");
     }
     let sha256 = format!("{:x}", sha256.finalize());
@@ -683,13 +703,11 @@ async fn stream_to_blob(
     if let Some(expected) = expected.and_then(|remote| remote.sha256.as_deref())
         && expected != sha256
     {
-        let _ = fs::remove_file(&staging);
         bail!("SHA-256 mismatch for {path}");
     }
     if let Some(expected) = expected.and_then(|remote| remote.git_blob_id.as_deref())
         && expected != git
     {
-        let _ = fs::remove_file(&staging);
         bail!("Git blob hash mismatch for {path}");
     }
     let blob = cache_root.join("blobs").join("sha256").join(&sha256);
@@ -699,15 +717,17 @@ async fn stream_to_blob(
     if blob.exists() {
         fs::remove_file(&staging)?;
     } else if let Err(error) = fs::rename(&staging, &blob) {
-        // Another concurrent file may have produced the same content-addressed
-        // blob between the existence check and the rename. In that case the
-        // already-complete blob wins and this staging file can be discarded.
+        // On Windows a concurrent download may have produced the same
+        // content-addressed blob between the existence check and the rename; in
+        // that case the already-complete blob wins and this staging file is
+        // discarded. Otherwise the rename error is real.
         if blob.exists() {
             fs::remove_file(&staging)?;
         } else {
             return Err(error.into());
         }
     }
+    guard.keep = true;
     Ok((blob, sha256, git))
 }
 
