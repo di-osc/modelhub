@@ -518,9 +518,11 @@ async fn modelscope_files_from_response(
 /// Reject empty, absolute, or `..`-containing repository paths and revisions.
 ///
 /// Callers run this before any network request so a bad `file` or `revision`
-/// never reaches a hub.
-#[allow(dead_code)]
-fn validate_relative(label: &str, value: &str) -> anyhow::Result<()> {
+/// never reaches a hub. Unlike `upload::validate_relative`, this is
+/// component-based: a name like `file..txt` is allowed, and a backslash is an
+/// ordinary character on Unix (Windows path prefixes are still rejected).
+#[allow(dead_code)] // first production caller lands in the next change
+fn validate_repo_value(label: &str, value: &str) -> anyhow::Result<()> {
     let path = Path::new(value);
     let invalid = value.is_empty()
         || path.is_absolute()
@@ -1105,14 +1107,16 @@ mod tests {
     }
 
     #[test]
-    fn validate_relative_rejects_traversal_and_absolute_paths() {
-        assert!(validate_relative("file path", "data/a.mp3").is_ok());
-        assert!(validate_relative("revision", "refs/pr/1").is_ok());
-        assert!(validate_relative("file path", "../evil").is_err());
-        assert!(validate_relative("file path", "a/../../b").is_err());
-        assert!(validate_relative("file path", "/etc/passwd").is_err());
-        assert!(validate_relative("revision", "..").is_err());
-        assert!(validate_relative("revision", "/main").is_err());
-        assert!(validate_relative("file path", "").is_err());
+    fn validate_repo_value_rejects_traversal_and_absolute_paths() {
+        assert!(validate_repo_value("file path", "data/a.mp3").is_ok());
+        assert!(validate_repo_value("revision", "refs/pr/1").is_ok());
+        assert!(validate_repo_value("file path", "file..txt").is_ok());
+        assert!(validate_repo_value("file path", "./data/a.mp3").is_ok());
+        assert!(validate_repo_value("file path", "../evil").is_err());
+        assert!(validate_repo_value("file path", "a/../../b").is_err());
+        assert!(validate_repo_value("file path", "/etc/passwd").is_err());
+        assert!(validate_repo_value("revision", "..").is_err());
+        assert!(validate_repo_value("revision", "/main").is_err());
+        assert!(validate_repo_value("file path", "").is_err());
     }
 }
