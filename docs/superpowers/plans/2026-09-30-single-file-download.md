@@ -30,7 +30,7 @@
 - Modify: `src/unified.rs:25-38`（`Backend` 定义）、`src/unified.rs:302-307`（常量）、`src/unified.rs:374-442`（URL 拼装）、文件末尾新增 `#[cfg(test)] mod tests`
 - Modify: `src/lib.rs:37-38`
 
-- [ ] **Step 1: 写失败的单元测试**
+- [x] **Step 1: 写失败的单元测试**
 
 在 `src/unified.rs` 末尾追加：
 
@@ -86,12 +86,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `cargo test --lib unified::tests`
 Expected: 编译失败，`cannot find function huggingface_file_url`（以及 `modelscope_file_url`、`default_revision`）
 
-- [ ] **Step 3: 实现 URL 与枚举改动**
+- [x] **Step 3: 实现 URL 与枚举改动**
 
 把 `src/unified.rs` 里的：
 
@@ -284,12 +284,12 @@ pub use unified::DownloadedRepo;
 pub use unified::Backend;
 ```
 
-- [ ] **Step 4: 运行测试确认通过**
+- [x] **Step 4: 运行测试确认通过**
 
 Run: `cargo test --lib unified::tests`
 Expected: 3 passed
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/unified.rs src/lib.rs
@@ -304,7 +304,7 @@ git commit -m "Expose Backend and add single-file URL builders with ModelScope e
 - Modify: `src/unified.rs`（`safe_path` 附近新增函数；`#[cfg(test)] mod tests` 追加）
 - Test: `src/unified.rs` 内联单元测试
 
-- [ ] **Step 1: 写失败的单元测试**
+- [x] **Step 1: 写失败的单元测试**
 
 在 `src/unified.rs` 的 `mod tests` 里追加：
 
@@ -324,12 +324,12 @@ git commit -m "Expose Backend and add single-file URL builders with ModelScope e
     }
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `cargo test --lib validate_repo_value`
 Expected: 编译失败，`cannot find function validate_repo_value`
 
-- [ ] **Step 3: 实现校验**
+- [x] **Step 3: 实现校验**
 
 在 `fn safe_path` 之前插入：
 
@@ -358,12 +358,12 @@ fn validate_repo_value(label: &str, value: &str) -> anyhow::Result<()> {
 }
 ```
 
-- [ ] **Step 4: 运行测试确认通过**
+- [x] **Step 4: 运行测试确认通过**
 
 Run: `cargo test --lib validate_repo_value`
 Expected: 1 passed
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/unified.rs
@@ -377,12 +377,12 @@ git commit -m "Add path and revision validation for repository-relative values"
 **Files:**
 - Modify: `src/unified.rs:508-611`（`materialize`）、`src/unified.rs:844-854`（`download_loaded` 的进度条）
 
-- [ ] **Step 1: 记录重构前的行为基线**
+- [x] **Step 1: 记录重构前的行为基线**
 
 Run: `cargo test`
 Expected: 全部通过（记录当前用例数，后续必须一致）
 
-- [ ] **Step 2: 用 `materialize` + `stream_to_blob` 替换现有 `materialize`**
+- [x] **Step 2: 用 `materialize` + `stream_to_blob` 替换现有 `materialize`**
 
 把 `src/unified.rs` 里从 `async fn materialize(` 到它的结尾 `}`（函数体包含 staging、请求、校验、blob 落盘）整体替换为：
 
@@ -506,7 +506,7 @@ async fn stream_to_blob(
 }
 ```
 
-- [ ] **Step 3: 抽出进度条 helper 并用于 `download_loaded`**
+- [x] **Step 3: 抽出进度条 helper 并用于 `download_loaded`**
 
 在 `fn snapshot_root` 之前插入：
 
@@ -550,12 +550,12 @@ fn progress_bar(enabled: bool, message: String) -> anyhow::Result<ProgressBar> {
     let progress = progress_bar(progress, format!("{repo_id} • verifying and downloading"))?;
 ```
 
-- [ ] **Step 4: 运行测试确认行为不变**
+- [x] **Step 4: 运行测试确认行为不变**
 
 Run: `cargo test && cargo clippy --all-targets`
 Expected: 与 Step 1 相同的通过用例；clippy 无新增 warning
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/unified.rs
@@ -573,7 +573,7 @@ git commit -m "Split stream_to_blob out of materialize for reusable downloads"
 - Modify: `src/ops.rs:10-82`（`DownloadOptions`、`download`）
 - Test: `tests/download.rs`、`tests/api.rs`
 
-- [ ] **Step 1: 加 `temp_env` dev-dependency**
+- [x] **Step 1: 加 `temp_env` dev-dependency**
 
 在 `Cargo.toml` 末尾追加：
 
@@ -584,7 +584,7 @@ temp-env = "0.3"
 
 （crate 名是 `temp-env`，库名是 `temp_env`；`std::env::set_var` 在 edition 2024 是 unsafe，而本 crate `unsafe_code = "forbid"`，所以用它来在测试里安全地设置环境变量。）
 
-- [ ] **Step 2: 写失败的集成测试**
+- [x] **Step 2: 写失败的集成测试**
 
 创建 `tests/download.rs`：
 
@@ -845,12 +845,12 @@ fn missing_hints_probe_candidates_and_first_success_wins() {
     assert!(download.file.is_none());
 ```
 
-- [ ] **Step 3: 运行测试确认失败**
+- [x] **Step 3: 运行测试确认失败**
 
 Run: `cargo test --test download`
 Expected: 编译失败，`DownloadOptions` 没有 `kind`/`backend` 字段
 
-- [ ] **Step 4: 实现 `download_single_file`**
+- [x] **Step 4: 实现 `download_single_file`**
 
 在 `src/unified.rs` 的 `fn add_separate` 之后插入：
 
@@ -1001,7 +1001,7 @@ pub async fn download_single_file(
 }
 ```
 
-- [ ] **Step 5: 给 `DownloadOptions` 加字段并在 `download()` 分派**
+- [x] **Step 5: 给 `DownloadOptions` 加字段并在 `download()` 分派**
 
 `src/ops.rs` 顶部导入改为：
 
@@ -1099,12 +1099,12 @@ pub async fn download(opts: &DownloadOptions) -> Result<DownloadedRepo> {
 }
 ```
 
-- [ ] **Step 6: 运行测试确认通过**
+- [x] **Step 6: 运行测试确认通过**
 
 Run: `cargo test --test download && cargo test --test api`
 Expected: `tests/download.rs` 4 passed；`tests/api.rs` 3 passed
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add Cargo.toml Cargo.lock tests/download.rs tests/api.rs src/unified.rs src/ops.rs
@@ -1126,7 +1126,7 @@ git commit -m "Download single files without listing the repository"
 - Modify: `src/ops.rs`（`download` 调用 `download_repo` 传 `kind`/`backend`）
 - Test: `tests/download.rs`
 
-- [ ] **Step 1: 写失败的集成测试**
+- [x] **Step 1: 写失败的集成测试**
 
 在 `tests/download.rs` 末尾追加：
 
@@ -1232,12 +1232,12 @@ fn whole_repo_with_backend_probes_both_kinds_on_that_backend() {
 }
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `cargo test --test download whole_repo`
 Expected: 失败 —— `backend: Some(ModelScope)` 目前仍会访问 Hugging Face，断言 `requests.iter().all(...)` 或请求数失败
 
-- [ ] **Step 3: 让 `detect_manifests` / `probe_manifests` 接受提示**
+- [x] **Step 3: 让 `detect_manifests` / `probe_manifests` 接受提示**
 
 把 `src/unified.rs` 的 `download_repo` 替换为：
 
@@ -1412,7 +1412,7 @@ async fn probe_manifests(
 }
 ```
 
-- [ ] **Step 4: 从 `download_loaded` 移除单文件分支**
+- [x] **Step 4: 从 `download_loaded` 移除单文件分支**
 
 删除 `download_loaded` 签名里的 `file: Option<&str>,` 参数（保留 `progress: bool`）。
 
@@ -1456,7 +1456,7 @@ async fn probe_manifests(
     write_repo_manifest(&repo_root, kind, hf.as_ref(), ms.as_ref())?;
 ```
 
-- [ ] **Step 5: 让 `ops::download` 传递提示**
+- [x] **Step 5: 让 `ops::download` 传递提示**
 
 把 `src/ops.rs` 里 `download_repo(...)` 调用的参数列表从：
 
@@ -1479,12 +1479,12 @@ async fn probe_manifests(
     )
 ```
 
-- [ ] **Step 6: 运行测试确认通过**
+- [x] **Step 6: 运行测试确认通过**
 
 Run: `cargo test`
 Expected: 全部通过（含 `tests/download.rs` 7 passed）
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/unified.rs src/ops.rs tests/download.rs
@@ -1502,7 +1502,7 @@ git commit -m "Narrow repository manifest probing with kind and backend hints"
 **Files:**
 - Modify: `src/main.rs:4`、`19-39`、`126-162`、`294-320`、`578-586`
 
-- [ ] **Step 1: 写失败的 CLI 解析测试**
+- [x] **Step 1: 写失败的 CLI 解析测试**
 
 把 `src/main.rs` 测试模块里的 `download_accepts_an_optional_file` 替换为：
 
@@ -1551,12 +1551,12 @@ git commit -m "Narrow repository manifest probing with kind and backend hints"
     }
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `cargo test --bin modelhub download_accepts_kind_and_backend_hints`
 Expected: 失败，`unexpected argument '--repo-type'`
 
-- [ ] **Step 3: 加 CLI 字段与解析函数**
+- [x] **Step 3: 加 CLI 字段与解析函数**
 
 `src/main.rs` 顶部导入改为：
 
@@ -1647,12 +1647,12 @@ fn parse_download_backend(value: &str) -> Result<Backend, String> {
         }
 ```
 
-- [ ] **Step 4: 运行测试确认通过**
+- [x] **Step 4: 运行测试确认通过**
 
 Run: `cargo test --bin modelhub && cargo clippy --all-targets`
 Expected: 全部通过，clippy 无新增 warning
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/main.rs
@@ -1666,7 +1666,7 @@ git commit -m "Add --repo-type and --backend hints to the download command"
 **Files:**
 - Modify: `README.md`
 
-- [ ] **Step 1: 更新单文件下载说明**
+- [x] **Step 1: 更新单文件下载说明**
 
 把 README 的：
 
@@ -1702,7 +1702,7 @@ modelhub download org/name data/train.parquet --repo-type dataset --backend mode
 `--repo-type` 与 `--backend` 同样可以用于整仓下载：只传其一时，只探测剩下那一个维度；都传时完全不探测。两个参数都可省略。
 ```
 
-- [ ] **Step 2: 更新库 API 说明**
+- [x] **Step 2: 更新库 API 说明**
 
 把 README 库 API 段落里的：
 
@@ -1725,12 +1725,12 @@ options.backend = Some(modelhub::Backend::ModelScope);
 let downloaded = runtime.block_on(modelhub::download(&options))?;
 ```
 
-- [ ] **Step 3: 全量验证**
+- [x] **Step 3: 全量验证**
 
 Run: `cargo fmt --check && cargo clippy --all-targets && cargo test && cargo doc --no-deps`
 Expected: 全部通过；`cargo doc` 无 warning
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add README.md
