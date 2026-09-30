@@ -97,5 +97,7 @@ fn async_operations_are_exported() {
     let mut download = modelhub::DownloadOptions::new("acme/demo");
     download.kind = Some(modelhub::RepoKind::Dataset);
     download.backend = Some(modelhub::Backend::ModelScope);
+    assert_eq!(download.kind, Some(modelhub::RepoKind::Dataset));
+    assert_eq!(download.backend, Some(modelhub::Backend::ModelScope));
     assert!(download.file.is_none());
 }

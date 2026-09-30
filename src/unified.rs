@@ -867,6 +867,34 @@ async fn send_first_success(
     )
 }
 
+/// Write the marker files that let `list` and `clear` identify a repository.
+fn ensure_repo_markers(repo_root: &Path, repo_id: &str) -> anyhow::Result<()> {
+    fs::create_dir_all(repo_root)?;
+    fs::write(repo_root.join(".modelhub-model-id"), repo_id)?;
+    fs::write(repo_root.join(".modelhub-layout"), "cas-v1")?;
+    Ok(())
+}
+
+/// Snapshot revisions that may already hold `file` for one candidate.
+///
+/// A whole-repository Hugging Face download stores its snapshots under the
+/// resolved commit sha and records that sha in `refs/<revision>`. Consulting the
+/// local ref lets an existing repository download satisfy a single-file request
+/// without touching the network.
+fn snapshot_revisions(repo_root: &Path, backend: Backend, revision: &str) -> Vec<String> {
+    let mut revisions = vec![revision.to_owned()];
+    if backend == Backend::HuggingFace
+        && let Ok(sha) =
+            fs::read_to_string(repo_root.join("huggingface").join("refs").join(revision))
+    {
+        let sha = sha.trim();
+        if !sha.is_empty() && sha != revision {
+            revisions.push(sha.to_owned());
+        }
+    }
+    revisions
+}
+
 /// Download one repository file into the modelhub cache.
 ///
 /// Never lists the repository: the cache is checked first, and a miss issues one
@@ -882,6 +910,7 @@ pub async fn download_single_file(
     cache_root: &Path,
     progress: bool,
 ) -> anyhow::Result<DownloadedRepo> {
+    validate_repo_value("repo id", repo_id)?;
     validate_repo_value("file path", file)?;
     if let Some(revision) = revision {
         validate_repo_value("revision", revision)?;
@@ -903,14 +932,20 @@ pub async fn download_single_file(
         for backend in &backends {
             let revision =
                 revision.map_or_else(|| backend.default_revision().to_owned(), str::to_owned);
-            let target = safe_path(&snapshot_root(&repo_root(*kind), *backend, &revision), file)?;
-            if target.is_file() {
-                return Ok(single_file_result(
-                    *kind,
-                    *backend,
-                    repo_root(*kind),
-                    target,
-                ));
+            for snapshot_revision in snapshot_revisions(&repo_root(*kind), *backend, &revision) {
+                let target = safe_path(
+                    &snapshot_root(&repo_root(*kind), *backend, &snapshot_revision),
+                    file,
+                )?;
+                if target.is_file() {
+                    ensure_repo_markers(&repo_root(*kind), repo_id)?;
+                    return Ok(single_file_result(
+                        *kind,
+                        *backend,
+                        repo_root(*kind),
+                        target,
+                    ));
+                }
             }
         }
     }
@@ -926,22 +961,29 @@ pub async fn download_single_file(
     }
     let hf_client = huggingface_client()?;
     let ms_client = crate::modelscope::client::http_client()?;
-    let progress = progress_bar(progress, format!("{repo_id} • downloading {file}"))?;
-    let (kind, backend, _, response) =
-        send_first_success(candidates, file, repo_id, &hf_client, &ms_client).await?;
-    let (blob, _, _) =
-        match stream_to_blob(backend, file, response, None, cache_root, &progress).await {
-            Ok(value) => value,
-            Err(error) => {
-                progress.abandon_with_message(format!("{repo_id} • download failed"));
-                return Err(error);
-            }
-        };
-    let revision = revision.map_or_else(|| backend.default_revision().to_owned(), str::to_owned);
-    let target = safe_path(&snapshot_root(&repo_root(kind), backend, &revision), file)?;
-    link_artifact(&blob, &target)?;
-    progress.finish_with_message(format!("✓ {repo_id} • downloaded {file}"));
-    Ok(single_file_result(kind, backend, repo_root(kind), target))
+    let bar = progress_bar(progress, format!("{repo_id} • downloading {file}"))?;
+    let outcome = async {
+        let (kind, backend, _, response) =
+            send_first_success(candidates, file, repo_id, &hf_client, &ms_client).await?;
+        let (blob, _, _) = stream_to_blob(backend, file, response, None, cache_root, &bar).await?;
+        ensure_repo_markers(&repo_root(kind), repo_id)?;
+        let revision =
+            revision.map_or_else(|| backend.default_revision().to_owned(), str::to_owned);
+        let target = safe_path(&snapshot_root(&repo_root(kind), backend, &revision), file)?;
+        link_artifact(&blob, &target)?;
+        Ok::<_, anyhow::Error>(single_file_result(kind, backend, repo_root(kind), target))
+    }
+    .await;
+    match outcome {
+        Ok(downloaded) => {
+            bar.finish_with_message(format!("✓ {repo_id} • downloaded {file}"));
+            Ok(downloaded)
+        }
+        Err(error) => {
+            bar.abandon_with_message(format!("{repo_id} • download failed"));
+            Err(error)
+        }
+    }
 }
 
 /// Download a repository, auto-detecting whether it is a model or a dataset.

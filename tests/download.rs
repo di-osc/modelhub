@@ -165,6 +165,31 @@ fn cache_hit_returns_without_touching_the_network() {
 }
 
 #[test]
+fn cache_hit_via_huggingface_ref_skips_network() {
+    let root = temp_root("ref-hit");
+    let repo = root.join("cache/models/acme--demo/huggingface");
+    let snapshot = repo.join("snapshots/abc123");
+    fs::create_dir_all(&snapshot).unwrap();
+    let cached = snapshot.join("config.json");
+    fs::write(&cached, b"{}").unwrap();
+    fs::create_dir_all(repo.join("refs")).unwrap();
+    fs::write(repo.join("refs/main"), b"abc123").unwrap();
+    let mock = MockHub::start(Vec::new());
+
+    with_hub(&mock, &root, || {
+        let mut options = single_file_options(&root, "config.json");
+        options.kind = Some(RepoKind::Model);
+        options.backend = Some(Backend::HuggingFace);
+        let downloaded = run(&options).unwrap();
+        assert_eq!(downloaded.kind, RepoKind::Model);
+        assert_eq!(downloaded.file.as_deref(), Some(cached.as_path()));
+    });
+
+    assert!(mock.requests().is_empty());
+    fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
 fn known_kind_and_backend_issue_exactly_one_request() {
     let root = temp_root("one-request");
     let mock = MockHub::start(vec![(
@@ -191,6 +216,12 @@ fn known_kind_and_backend_issue_exactly_one_request() {
                 .join("cache/datasets/acme--demo/.modelhub-manifest.json")
                 .exists()
         );
+        let repo = root.join("cache/datasets/acme--demo");
+        assert_eq!(
+            fs::read_to_string(repo.join(".modelhub-model-id")).unwrap(),
+            "acme/demo"
+        );
+        assert!(repo.join(".modelhub-layout").is_file());
         let blob = root.join("cache/blobs/sha256").join(sha256_hex(b"audio"));
         assert!(blob.is_file());
     });
