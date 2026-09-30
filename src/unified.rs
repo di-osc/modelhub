@@ -515,6 +515,27 @@ async fn modelscope_files_from_response(
         .files)
 }
 
+/// Reject empty, absolute, or `..`-containing repository paths and revisions.
+///
+/// Callers run this before any network request so a bad `file` or `revision`
+/// never reaches a hub.
+#[allow(dead_code)]
+fn validate_relative(label: &str, value: &str) -> anyhow::Result<()> {
+    let path = Path::new(value);
+    let invalid = value.is_empty()
+        || path.is_absolute()
+        || path.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        });
+    if invalid {
+        bail!("{label} must be a non-empty relative path without `..`: {value}");
+    }
+    Ok(())
+}
+
 fn safe_path(root: &Path, path: &str) -> anyhow::Result<PathBuf> {
     let path = Path::new(path);
     if path.is_absolute() {
@@ -1081,5 +1102,17 @@ mod tests {
     fn default_revisions_differ_per_backend() {
         assert_eq!(Backend::HuggingFace.default_revision(), "main");
         assert_eq!(Backend::ModelScope.default_revision(), "master");
+    }
+
+    #[test]
+    fn validate_relative_rejects_traversal_and_absolute_paths() {
+        assert!(validate_relative("file path", "data/a.mp3").is_ok());
+        assert!(validate_relative("revision", "refs/pr/1").is_ok());
+        assert!(validate_relative("file path", "../evil").is_err());
+        assert!(validate_relative("file path", "a/../../b").is_err());
+        assert!(validate_relative("file path", "/etc/passwd").is_err());
+        assert!(validate_relative("revision", "..").is_err());
+        assert!(validate_relative("revision", "/main").is_err());
+        assert!(validate_relative("file path", "").is_err());
     }
 }
