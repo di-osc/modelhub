@@ -10,7 +10,8 @@ pub const USER_AGENT: (&str, &str) = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/89.0.4389.90 Safari/537.36",
 );
 
-pub async fn http_client() -> anyhow::Result<reqwest::Client> {
+/// HTTP client that attaches saved `ModelScope` cookies when they exist.
+pub fn http_client() -> anyhow::Result<reqwest::Client> {
     let client = reqwest::Client::builder().connect_timeout(Duration::from_secs(10));
     let mut default_headers = reqwest::header::HeaderMap::new();
 

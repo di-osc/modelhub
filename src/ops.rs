@@ -8,6 +8,9 @@ use crate::repos::{
     modelhub_cached, sources, status,
 };
 use crate::unified::{DownloadedRepo, RepoManifest};
+use crate::upload::{
+    UploadBackend, UploadOptions, UploadSummary, available_backends, collect_files,
+};
 use anyhow::{Context, Result, bail};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -78,6 +81,38 @@ pub async fn download(opts: &DownloadOptions) -> Result<DownloadedRepo> {
     Ok(downloaded)
 }
 
+/// Upload local files to Hugging Face and/or `ModelScope`.
+///
+/// Targets every backend with credentials unless `opts.backends` is set.
+pub async fn upload(opts: &UploadOptions) -> Result<UploadSummary> {
+    if opts.delete && opts.path_in_repo.is_none() && !crate::upload::has_directory(&opts.local) {
+        bail!("`delete` needs a directory input or `path_in_repo` to scope deletions");
+    }
+    let files = collect_files(
+        &opts.local,
+        opts.path_in_repo.as_deref(),
+        &opts.include,
+        &opts.exclude,
+    )?;
+    let backends = if opts.backends.is_empty() {
+        available_backends()
+    } else {
+        opts.backends.clone()
+    };
+    if backends.is_empty() {
+        bail!("no upload credentials found; set HF_TOKEN or MODELSCOPE_API_TOKEN");
+    }
+    let mut results = Vec::new();
+    for backend in backends {
+        let result = match backend {
+            UploadBackend::HuggingFace => crate::upload::huggingface::upload(opts, &files).await?,
+            UploadBackend::ModelScope => crate::upload::modelscope::upload(opts, &files).await?,
+        };
+        results.push(result);
+    }
+    Ok(UploadSummary { results })
+}
+
 /// Options for [`list`].
 #[derive(Clone, Debug)]
 pub struct ListOptions {
@@ -89,7 +124,6 @@ pub struct ListOptions {
     /// Override the Hugging Face hub directory.
     pub huggingface_hub: Option<PathBuf>,
 }
-
 impl Default for ListOptions {
     fn default() -> Self {
         Self {
@@ -98,6 +132,30 @@ impl Default for ListOptions {
             modelscope_cache: None,
             huggingface_hub: None,
         }
+    }
+}
+
+impl ListOptions {
+    /// `ModelScope` cache directory [`list`] will scan.
+    ///
+    /// Uses [`Self::modelscope_cache`] when set. Otherwise follows
+    /// `MODELSCOPE_CACHE`, then `~/.cache/modelscope`.
+    #[must_use]
+    pub fn modelscope_cache_dir(&self) -> PathBuf {
+        self.modelscope_cache
+            .clone()
+            .unwrap_or_else(crate::modelscope::cache_dir)
+    }
+
+    /// Hugging Face hub directory [`list`] will scan.
+    ///
+    /// Uses [`Self::huggingface_hub`] when set. Otherwise follows
+    /// `HUGGINGFACE_HUB_CACHE`, then `HF_HOME/hub`, then `~/.cache/huggingface/hub`.
+    #[must_use]
+    pub fn huggingface_cache_dir(&self) -> PathBuf {
+        self.huggingface_hub
+            .clone()
+            .unwrap_or_else(crate::huggingface::cache_dir)
     }
 }
 
@@ -362,14 +420,7 @@ pub fn clear(opts: &ClearOptions) -> Result<ClearSummary> {
 }
 
 fn resolve_backends(opts: &ListOptions) -> (PathBuf, PathBuf) {
-    (
-        opts.modelscope_cache
-            .clone()
-            .unwrap_or_else(crate::modelscope::cache_dir),
-        opts.huggingface_hub
-            .clone()
-            .unwrap_or_else(crate::huggingface::cache_dir),
-    )
+    (opts.modelscope_cache_dir(), opts.huggingface_cache_dir())
 }
 
 fn resolve_backends_check(opts: &CheckOptions) -> (PathBuf, PathBuf) {

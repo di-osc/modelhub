@@ -1,8 +1,7 @@
 use clap::{Parser, Subcommand};
 use comfy_table::presets::UTF8_FULL;
 use comfy_table::{Cell, CellAlignment, ContentArrangement, Table};
-use modelhub::ops::RepoEntry;
-use modelhub::repos::{CacheSource, RepoStatus};
+use modelhub::{CacheSource, RepoEntry, RepoKind, RepoStatus, UploadBackend};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Parser)]
@@ -78,6 +77,50 @@ enum Command {
         #[arg(long)]
         cache_dir: Option<PathBuf>,
     },
+    /// Upload a local file or directory to a repository.
+    Upload {
+        /// Repository identifier, for example `org/name`.
+        repo_id: String,
+        /// One or more local files or directories to upload.
+        #[arg(required = true)]
+        local: Vec<PathBuf>,
+        /// Whether the repository is a model or a dataset.
+        #[arg(long, value_parser = parse_repo_type)]
+        repo_type: RepoKind,
+        /// Destination sub-path inside the repository.
+        #[arg(long)]
+        path_in_repo: Option<String>,
+        /// Target branch or tag (revision). Defaults to `main` on Hugging Face, `master` on `ModelScope`.
+        #[arg(short, long)]
+        revision: Option<String>,
+        /// Commit message.
+        #[arg(long)]
+        commit_message: Option<String>,
+        /// Do not create the repository when it is missing.
+        #[arg(long)]
+        no_create: bool,
+        /// Create the repository as private.
+        #[arg(long)]
+        private: bool,
+        /// Backend to upload to. Repeatable; defaults to every backend with credentials.
+        #[arg(long, value_parser = parse_upload_backend)]
+        backend: Vec<UploadBackend>,
+        /// Only upload files matching this glob. Repeatable.
+        #[arg(long)]
+        include: Vec<String>,
+        /// Skip files matching this glob. Repeatable.
+        #[arg(long)]
+        exclude: Vec<String>,
+        /// Delete remote files that are absent locally (within the upload scope).
+        #[arg(long)]
+        delete: bool,
+        /// Show what would change without uploading anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Upload every file, ignoring the remote manifest.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 /// Parse `--backend` as one supported cache.
@@ -98,6 +141,24 @@ fn parse_jobs(value: &str) -> Result<usize, String> {
         return Err("jobs must be at least 1".to_owned());
     }
     Ok(jobs)
+}
+
+/// Parse `--repo-type` as a model or dataset.
+fn parse_repo_type(value: &str) -> Result<RepoKind, String> {
+    match value {
+        "model" => Ok(RepoKind::Model),
+        "dataset" => Ok(RepoKind::Dataset),
+        _ => Err("repo type must be model or dataset".to_owned()),
+    }
+}
+
+/// Parse `--backend` for uploads.
+fn parse_upload_backend(value: &str) -> Result<UploadBackend, String> {
+    match value {
+        "huggingface" => Ok(UploadBackend::HuggingFace),
+        "modelscope" => Ok(UploadBackend::ModelScope),
+        _ => Err("backend must be huggingface or modelscope".to_owned()),
+    }
 }
 
 /// One formatted list row.
@@ -273,8 +334,8 @@ fn main() -> anyhow::Result<()> {
                 println!(
                     "No cached models or datasets in modelhub ({}), ModelScope ({}), or Hugging Face ({})",
                     options.cache_root.display(),
-                    modelhub::modelscope::cache_dir().display(),
-                    modelhub::huggingface::cache_dir().display()
+                    options.modelscope_cache_dir().display(),
+                    options.huggingface_cache_dir().display()
                 );
                 return Ok(());
             }
@@ -335,6 +396,76 @@ fn main() -> anyhow::Result<()> {
             } else {
                 let model_id = model_id.unwrap_or_default();
                 println!("Cleared `{model_id}` from {labels}");
+            }
+            Ok(())
+        }
+        Command::Upload {
+            repo_id,
+            local,
+            repo_type,
+            path_in_repo,
+            revision,
+            commit_message,
+            no_create,
+            private,
+            backend,
+            include,
+            exclude,
+            delete,
+            dry_run,
+            force,
+        } => {
+            let options = modelhub::UploadOptions {
+                repo_id: repo_id.clone(),
+                kind: repo_type,
+                local,
+                path_in_repo,
+                revision,
+                commit_message,
+                create: !no_create,
+                private,
+                backends: backend,
+                include,
+                exclude,
+                delete,
+                dry_run,
+                force,
+                progress: true,
+            };
+            let summary = runtime()?.block_on(modelhub::upload(&options))?;
+            for result in &summary.results {
+                let counts = result.counts;
+                println!(
+                    "{} {}@{}: +{} ~{} ={} -{}",
+                    if options.dry_run {
+                        "Would update"
+                    } else {
+                        "Updated"
+                    },
+                    repo_id,
+                    result.revision,
+                    counts.added,
+                    counts.modified,
+                    counts.unchanged,
+                    counts.deleted
+                );
+                if result.created {
+                    println!("Created repository {}", result.backend.label());
+                }
+                if !options.dry_run && !result.uploaded.is_empty() {
+                    println!(
+                        "Uploaded {} file(s) ({} bytes) to {}",
+                        result.uploaded.len(),
+                        result.bytes,
+                        result.backend.label()
+                    );
+                }
+                if result.skipped > 0 {
+                    println!("Skipped {} file(s) ignored by the server", result.skipped);
+                }
+                if let Some(commit) = &result.commit {
+                    println!("Commit {commit}");
+                }
             }
             Ok(())
         }

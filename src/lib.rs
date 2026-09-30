@@ -17,30 +17,25 @@
 //!
 //! `download` and `check` are `async`; `list` and `clear` are synchronous.
 
-pub mod cache;
-pub mod huggingface;
-pub mod modelscope;
-pub mod ops;
-pub mod repos;
-pub mod unified;
-
-/// Backward-compatible alias for the `ModelScope` cache directory.
-pub use modelscope::{cache_dir, set_cache_dir};
-
-/// Backward-compatible access to the `ModelScope` download module.
-pub use modelscope::download;
+mod cache;
+mod huggingface;
+mod modelscope;
+mod ops;
+mod repos;
+mod unified;
+mod upload;
 
 /// High-level operations, one per CLI subcommand.
 pub use ops::{
     CheckOptions, ClearOptions, ClearSummary, DownloadOptions, ListOptions, RepoEntry, check,
-    clear, download, list,
+    clear, download, list, upload,
 };
 
-/// Types shared by the discovery and operations APIs.
-pub use repos::{CacheSource, CachedRepo, RepoHit, RepoKind, RepoStatus};
+/// Types that appear in the operation signatures and result structs.
+pub use repos::{CacheSource, RepoHit, RepoKind, RepoStatus};
 
-/// Backward-compatible name for the model cache directory.
-#[must_use]
-pub fn modelscope_cache_dir() -> std::path::PathBuf {
-    modelscope::cache_dir()
-}
+/// Result of [`download`].
+pub use unified::DownloadedRepo;
+
+/// Types for [`upload`].
+pub use upload::{BackendUpload, UploadBackend, UploadCounts, UploadOptions, UploadSummary};

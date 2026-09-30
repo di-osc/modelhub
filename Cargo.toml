@@ -1,6 +1,6 @@
 [package]
 name = "modelhub"
-version = "0.1.4"
+version = "0.2.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/di-osc/modelhub"
@@ -8,16 +8,19 @@ description = "Model cache and download helpers"
 
 [dependencies]
 anyhow = "1"
+base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 comfy-table = "8"
 futures-util = "0.3"
+globset = "0.4"
 indicatif = "0.18"
-reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"], default-features = false }
+reqwest = { version = "0.12", features = ["json", "multipart", "stream", "rustls-tls"], default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha1 = "0.10"
 sha2 = "0.10"
-tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
+tokio = { version = "1", features = ["fs", "io-util", "macros", "rt", "rt-multi-thread"] }
+tokio-util = { version = "0.7", features = ["io"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
 urlencoding = "2"

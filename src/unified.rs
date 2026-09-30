@@ -76,6 +76,64 @@ pub fn read_repo_manifest(repo_root: &Path) -> Option<RepoManifest> {
     serde_json::from_slice(&data).ok()
 }
 
+/// One remote file's identity, used to diff a local tree against the Hub.
+#[derive(Clone, Debug)]
+pub struct RemoteEntry {
+    pub size: u64,
+    pub sha256: Option<String>,
+    pub git_blob_id: Option<String>,
+}
+
+/// Remote file list for a repository revision.
+#[derive(Clone, Debug)]
+pub struct RemoteManifest {
+    pub files: BTreeMap<String, RemoteEntry>,
+}
+
+impl RemoteManifest {
+    fn from_manifest(manifest: &Manifest) -> Self {
+        Self {
+            files: manifest
+                .files
+                .iter()
+                .map(|(path, file)| {
+                    (
+                        path.clone(),
+                        RemoteEntry {
+                            size: file.size,
+                            sha256: file.sha256.clone(),
+                            git_blob_id: file.git_blob_id.clone(),
+                        },
+                    )
+                })
+                .collect(),
+        }
+    }
+}
+
+/// Fetch the current remote file list for one backend and revision.
+///
+/// Used by `upload` to upload only changed files.
+pub async fn fetch_remote_manifest(
+    backend: &str,
+    kind: RepoKind,
+    repo_id: &str,
+    revision: &str,
+) -> anyhow::Result<RemoteManifest> {
+    let manifest = match backend {
+        "huggingface" => {
+            let client = huggingface_client()?;
+            huggingface_manifest(&client, kind, repo_id, revision).await?
+        }
+        "modelscope" => {
+            let client = crate::modelscope::client::http_client()?;
+            modelscope_manifest(&client, kind, repo_id, revision).await?
+        }
+        other => bail!("unsupported backend: {other}"),
+    };
+    Ok(RemoteManifest::from_manifest(&manifest))
+}
+
 /// Persist a manifest record beside a repository's snapshots.
 pub fn write_repo_manifest_record(repo_root: &Path, record: &RepoManifest) -> anyhow::Result<()> {
     let data = serde_json::to_vec_pretty(record)?;
@@ -100,7 +158,7 @@ pub async fn fetch_backend_manifest(
             Ok(BackendManifest::from_manifest(&manifest))
         }
         "modelscope" => {
-            let client = crate::modelscope::client::http_client().await?;
+            let client = crate::modelscope::client::http_client()?;
             let manifest = modelscope_manifest(&client, kind, repo_id, revision).await?;
             Ok(BackendManifest::from_manifest(&manifest))
         }
@@ -171,9 +229,6 @@ pub struct DownloadedRepo {
     /// Exact file materialized for a single-file download.
     pub file: Option<PathBuf>,
 }
-
-/// Backward-compatible alias for the download result.
-pub type DownloadedModel = DownloadedRepo;
 
 #[derive(Debug, Deserialize)]
 struct HfInfo {
@@ -584,48 +639,6 @@ fn add_separate(plans: &mut Vec<Artifact>, file: RemoteFile) {
     });
 }
 
-/// Download a model, verify hashes, and materialize deduplicated snapshots.
-#[allow(clippy::too_many_lines)]
-pub async fn download_model(
-    model_id: &str,
-    huggingface_revision: &str,
-    modelscope_revision: &str,
-    cache_root: &Path,
-    concurrency: usize,
-    allow_weight_mismatch: bool,
-    progress: bool,
-) -> anyhow::Result<DownloadedRepo> {
-    let hf_client = huggingface_client()?;
-    let ms_client = crate::modelscope::client::http_client().await?;
-    let (hf, ms) = load_manifests(
-        RepoKind::Model,
-        &hf_client,
-        &ms_client,
-        model_id,
-        huggingface_revision,
-        modelscope_revision,
-    )
-    .await;
-    if hf.is_none() && ms.is_none() {
-        bail!("model `{model_id}` was not found on any supported backend");
-    }
-    download_loaded(
-        RepoKind::Model,
-        model_id,
-        hf,
-        ms,
-        huggingface_revision,
-        cache_root,
-        &hf_client,
-        &ms_client,
-        concurrency,
-        allow_weight_mismatch,
-        None,
-        progress,
-    )
-    .await
-}
-
 /// Download a repository, auto-detecting whether it is a model or a dataset.
 ///
 /// `file` selects a single repository file; `None` downloads the whole repo.
@@ -642,7 +655,7 @@ pub async fn download_repo(
     progress: bool,
 ) -> anyhow::Result<DownloadedRepo> {
     let hf_client = huggingface_client()?;
-    let ms_client = crate::modelscope::client::http_client().await?;
+    let ms_client = crate::modelscope::client::http_client()?;
     let (kind, hf, ms) = detect_manifests(
         &hf_client,
         &ms_client,
@@ -672,27 +685,6 @@ fn huggingface_client() -> anyhow::Result<reqwest::Client> {
     Ok(reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(10))
         .build()?)
-}
-
-/// Fetch both backend manifests, reporting each failure through `tracing`.
-async fn load_manifests(
-    kind: RepoKind,
-    hf_client: &reqwest::Client,
-    ms_client: &reqwest::Client,
-    repo_id: &str,
-    huggingface_revision: &str,
-    modelscope_revision: &str,
-) -> (Option<Manifest>, Option<Manifest>) {
-    let (hf, ms) = tokio::join!(
-        huggingface_manifest(hf_client, kind, repo_id, huggingface_revision),
-        modelscope_manifest(ms_client, kind, repo_id, modelscope_revision)
-    );
-    (
-        hf.map_err(|error| tracing::warn!("Hugging Face manifest unavailable: {error:#}"))
-            .ok(),
-        ms.map_err(|error| tracing::warn!("ModelScope manifest unavailable: {error:#}"))
-            .ok(),
-    )
 }
 
 /// Quietly probe model and dataset manifests to decide what `repo_id` is.

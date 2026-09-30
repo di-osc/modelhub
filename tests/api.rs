@@ -82,6 +82,15 @@ fn async_operations_are_exported() {
     // Referencing the async entry points keeps the public surface honest.
     let _ = modelhub::download;
     let _ = modelhub::check;
+    let _ = modelhub::upload;
     let _options = modelhub::DownloadOptions::new("acme/demo");
     let _check_options = modelhub::CheckOptions::default();
+    let options = modelhub::UploadOptions::new(
+        "acme/demo",
+        modelhub::RepoKind::Dataset,
+        vec!["/tmp".into()],
+    );
+    assert!(options.create);
+    assert_eq!(options.kind, modelhub::RepoKind::Dataset);
+    assert!(options.backends.is_empty());
 }

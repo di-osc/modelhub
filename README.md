@@ -70,6 +70,29 @@ modelhub clear --all --backend modelscope
 
 `--backend` 可以是 `modelhub`、`modelscope` 或 `huggingface`。`clear --all` 会删除各后端的全部模型和数据集目录。
 
+## 上传
+
+把本地文件或目录上传到模型 / 数据集仓库。上传时必须显式指定 `--repo-type`;默认上传到所有已配置凭据的后端(HF 用 `HF_TOKEN`,或 `~/.cache/huggingface/token`;ModelScope 用 `MODELSCOPE_API_TOKEN`,或 `modelscope login` 写入的 `~/.modelscope/credentials/cookies`)。仓库不存在时默认自动创建,`--no-create` 可关闭。
+
+> 注意:`~/.modelscope/credentials/session` 是 SDK 的匿名安装标识,**不是** token,modelhub 不会读取它。
+
+```bash
+modelhub upload org/name ./output --repo-type model
+modelhub upload org/name ./weights.safetensors --repo-type model --path-in-repo weights.safetensors
+modelhub upload org/name ./data --repo-type dataset --backend modelscope --revision master
+modelhub upload org/name ./output --repo-type model --private --include '*.safetensors'
+```
+
+- 普通小文件内联进提交;大文件(或 LFS 后缀)走 LFS:HF 支持 basic 与 multipart 分块,ModelScope 走预签名 OSS。
+- 多文件会按内联体积与服务端上限自动拆成多次提交(ModelScope 单次提交上限 2000 个操作)。
+- `--include/--exclude` 用 glob 过滤;`--backend` 可重复以指定后端。
+- **默认增量更新**:每次先拉目标 revision 的远端清单做 diff,只传新增/修改的文件,内容未变化的跳过;没有任何变化时**不产生提交**。
+  - `--delete`:把远端有、本地没有的文件删掉。删除限定作用域——有 `--path-in-repo` 就只删该子树,否则要求输入是目录(避免单文件上传误删整库)。
+  - `--dry-run`:只打印 `+added ~modified =unchanged -deleted`,不上传、不建仓、不提交。
+  - `--force`:忽略 diff,全量覆盖(旧行为)。
+- `--revision/-r <branch>` 指定目标分支/版本(默认 HF `main`、ModelScope `master`)。HF 上分支不存在会**自动从 `main` 创建**;ModelScope 的 revision 是从 master 派生的 tag,建议先传 `master` 再打 tag。
+- HF 的 Xet 存储模式暂不支持,遇到会明确报错并提示改用 `huggingface-cli`。
+
 ## 库 API
 
 四个子命令都有对应的库函数,`download` / `check` 是 async,`list` / `clear` 是同步;它们返回结构化数据,不直接打印。
@@ -97,7 +120,19 @@ let summary = modelhub::clear(&ClearOptions { repo_id: Some("org/name".into()), 
 ```
 
 - `list` / `check` 返回 `Vec<RepoEntry>`,含 `kind`、`size`、`status`、`sources`、`paths`、`hits`。
-- `download` 返回 `unified::DownloadedRepo`(仓库根目录、各后端快照根、单文件路径)。
+- `download` 返回 `DownloadedRepo`(仓库根目录、各后端快照根、单文件路径)。
 - `clear` 返回 `ClearSummary { targets, removed, found }`。
+- `upload` 返回 `UploadSummary { results }`,每个后端一条 `BackendUpload`(`created`、`revision`、`commit`、`uploaded`、`skipped`、`bytes`、`counts`);`UploadOptions` 的 `delete` / `dry_run` / `force` 控制同步行为。
 - 需要显式指定缓存的场景,可用 `*Options` 里的 `cache_root`、`modelscope_cache`、`huggingface_hub` 覆盖默认值。
+
+```rust
+// 上传(需 async 运行时)
+let options = modelhub::UploadOptions::new(
+    "org/name",
+    modelhub::RepoKind::Model,
+    vec!["./output".into()],
+);
+let summary = runtime.block_on(modelhub::upload(&options))?;
+```
+
 
