@@ -323,14 +323,24 @@ fn hf_endpoints() -> Vec<String> {
 
 /// Base URL for `ModelScope` requests; `MODELSCOPE_ENDPOINT` overrides it.
 fn ms_base_url() -> String {
-    std::env::var("MODELSCOPE_ENDPOINT").map_or_else(
-        |_| MS_OFFICIAL.to_owned(),
-        |value| value.trim_end_matches('/').to_owned(),
-    )
+    std::env::var("MODELSCOPE_ENDPOINT")
+        .ok()
+        .map(|value| value.trim().trim_end_matches('/').to_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| MS_OFFICIAL.to_owned())
+}
+
+/// URL path prefix for a repository kind on Hugging Face.
+///
+/// Models are served from the site root; datasets live under `datasets/`.
+fn hf_repo_prefix(kind: RepoKind) -> &'static str {
+    match kind {
+        RepoKind::Model => "",
+        RepoKind::Dataset => "datasets/",
+    }
 }
 
 /// Resolve URL for one file on one Hugging Face endpoint.
-#[allow(dead_code)] // wired into the single-file path by a later change
 fn huggingface_file_url(
     endpoint: &str,
     kind: RepoKind,
@@ -339,8 +349,8 @@ fn huggingface_file_url(
     file: &str,
 ) -> String {
     format!(
-        "{endpoint}/{}/{}/resolve/{}/{}",
-        kind.segment(),
+        "{endpoint}/{}{}/resolve/{}/{}",
+        hf_repo_prefix(kind),
         encode_path(repo_id),
         encode_path(revision),
         encode_path(file)
@@ -348,10 +358,15 @@ fn huggingface_file_url(
 }
 
 /// Single-file download URL on `ModelScope`.
-fn modelscope_file_url(kind: RepoKind, repo_id: &str, revision: &str, file: &str) -> String {
+fn modelscope_file_url(
+    base: &str,
+    kind: RepoKind,
+    repo_id: &str,
+    revision: &str,
+    file: &str,
+) -> String {
     format!(
-        "{}/api/v1/{}/{}/repo?Revision={}&FilePath={}",
-        ms_base_url(),
+        "{base}/api/v1/{}/{}/repo?Revision={}&FilePath={}",
         kind.segment(),
         repo_id,
         urlencoding::encode(revision),
@@ -396,13 +411,7 @@ async fn huggingface_manifest(
                             size: size.unwrap_or(0),
                             sha256,
                             git_blob_id: if is_lfs { None } else { file.blob_id },
-                            url: format!(
-                                "{endpoint}/{}/{}/resolve/{}/{}",
-                                kind.segment(),
-                                encode_path(repo_id),
-                                encode_path(&info.sha),
-                                encode_path(&path)
-                            ),
+                            url: huggingface_file_url(&endpoint, kind, repo_id, &info.sha, &path),
                             path: path.clone(),
                         };
                         (path, remote)
@@ -441,7 +450,7 @@ async fn modelscope_manifest(
                 size: file.size,
                 sha256: file.sha256.filter(|hash| !hash.is_empty()),
                 git_blob_id: None,
-                url: modelscope_file_url(kind, repo_id, revision, &path),
+                url: modelscope_file_url(&ms_base_url(), kind, repo_id, revision, &path),
                 path: path.clone(),
             };
             (path, remote)
@@ -1030,23 +1039,38 @@ mod tests {
     use super::*;
 
     #[test]
-    fn huggingface_file_url_encodes_each_segment() {
-        let url = huggingface_file_url(
-            "https://hf.example",
-            RepoKind::Dataset,
-            "org/name",
-            "main",
-            "data/a b.mp3",
+    fn huggingface_file_url_uses_kind_specific_prefix() {
+        assert_eq!(
+            huggingface_file_url(
+                "https://hf.example",
+                RepoKind::Model,
+                "org/name",
+                "main",
+                "data/a b.mp3",
+            ),
+            "https://hf.example/org/name/resolve/main/data/a%20b.mp3"
         );
         assert_eq!(
-            url,
+            huggingface_file_url(
+                "https://hf.example",
+                RepoKind::Dataset,
+                "org/name",
+                "main",
+                "data/a b.mp3",
+            ),
             "https://hf.example/datasets/org/name/resolve/main/data/a%20b.mp3"
         );
     }
 
     #[test]
     fn modelscope_file_url_targets_one_file() {
-        let url = modelscope_file_url(RepoKind::Dataset, "org/name", "master", "data/a.mp3");
+        let url = modelscope_file_url(
+            MS_OFFICIAL,
+            RepoKind::Dataset,
+            "org/name",
+            "master",
+            "data/a.mp3",
+        );
         assert_eq!(
             url,
             "https://modelscope.cn/api/v1/datasets/org/name/repo?Revision=master&FilePath=data%2Fa.mp3"
