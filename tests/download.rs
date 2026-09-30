@@ -311,3 +311,107 @@ fn missing_hints_probe_candidates_and_first_success_wins() {
     );
     fs::remove_dir_all(&root).unwrap();
 }
+
+#[test]
+fn whole_repo_with_kind_and_backend_skips_detection() {
+    let root = temp_root("whole-hints");
+    let mock = MockHub::start(vec![
+        (
+            "/api/v1/models/acme/demo/repo/files?Recursive=true&Revision=master".to_owned(),
+            200,
+            br#"{"Success":true,"Data":{"Files":[{"Path":"config.json","Size":7,"Type":"blob"}]}}"#
+                .to_vec(),
+        ),
+        (
+            "/api/v1/models/acme/demo/repo?Revision=master&FilePath=config.json".to_owned(),
+            200,
+            br#"{"a":1}"#.to_vec(),
+        ),
+    ]);
+
+    with_hub(&mock, &root, || {
+        let mut options = DownloadOptions::new("acme/demo");
+        options.kind = Some(RepoKind::Model);
+        options.backend = Some(Backend::ModelScope);
+        options.cache_root = root.join("cache");
+        let downloaded = run(&options).unwrap();
+        assert_eq!(downloaded.kind, RepoKind::Model);
+        assert!(downloaded.huggingface_root.is_none());
+        assert!(downloaded.file.is_none());
+        let snapshot = root.join("cache/models/acme--demo/modelscope/snapshots/master/config.json");
+        assert_eq!(fs::read(&snapshot).unwrap(), br#"{"a":1}"#);
+        let manifest =
+            fs::read_to_string(root.join("cache/models/acme--demo/.modelhub-manifest.json"))
+                .unwrap();
+        assert!(manifest.contains("\"modelscope\""));
+        assert!(!manifest.contains("\"huggingface\""));
+    });
+
+    let requests = mock.requests();
+    assert!(
+        requests
+            .iter()
+            .all(|path| path.starts_with("/api/v1/models/"))
+    );
+    assert_eq!(requests.len(), 2);
+    assert!(root.join("ms-native/models/acme--demo").exists());
+    fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn whole_repo_with_kind_probes_both_backends_for_that_kind_only() {
+    let root = temp_root("whole-kind");
+    let mock = MockHub::start(vec![
+        (
+            "/api/datasets/acme/demo/revision/main?blobs=true".to_owned(),
+            200,
+            br#"{"sha":"abc123","siblings":[]}"#.to_vec(),
+        ),
+        (
+            "/api/v1/datasets/acme/demo/repo/tree?Recursive=True&Revision=master&PageNumber=1&PageSize=200".to_owned(),
+            200,
+            br#"{"Data":{"Files":[]}}"#.to_vec(),
+        ),
+    ]);
+
+    with_hub(&mock, &root, || {
+        let mut options = DownloadOptions::new("acme/demo");
+        options.kind = Some(RepoKind::Dataset);
+        options.cache_root = root.join("cache");
+        let downloaded = run(&options).unwrap();
+        assert_eq!(downloaded.kind, RepoKind::Dataset);
+        assert!(downloaded.huggingface_root.is_some());
+        assert!(downloaded.modelscope_root.is_some());
+    });
+
+    let requests = mock.requests();
+    assert!(requests.iter().all(|path| path.contains("/datasets/")));
+    assert!(!requests.iter().any(|path| path.contains("/models/")));
+    assert_eq!(requests.len(), 2);
+    fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn whole_repo_with_backend_probes_both_kinds_on_that_backend() {
+    let root = temp_root("whole-backend");
+    let mock = MockHub::start(vec![(
+        "/api/v1/datasets/acme/demo/repo/tree?Recursive=True&Revision=master&PageNumber=1&PageSize=200".to_owned(),
+        200,
+        br#"{"Data":{"Files":[]}}"#.to_vec(),
+    )]);
+
+    with_hub(&mock, &root, || {
+        let mut options = DownloadOptions::new("acme/demo");
+        options.backend = Some(Backend::ModelScope);
+        options.cache_root = root.join("cache");
+        let downloaded = run(&options).unwrap();
+        assert_eq!(downloaded.kind, RepoKind::Dataset);
+        assert!(downloaded.modelscope_root.is_some());
+        assert!(downloaded.huggingface_root.is_none());
+    });
+
+    let requests = mock.requests();
+    assert!(requests.iter().all(|path| path.starts_with("/api/v1/")));
+    assert_eq!(requests.len(), 2);
+    fs::remove_dir_all(&root).unwrap();
+}

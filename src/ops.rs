@@ -85,8 +85,9 @@ pub async fn download(opts: &DownloadOptions) -> Result<DownloadedRepo> {
         &opts.cache_root,
         opts.jobs,
         opts.all_backends,
-        None,
         opts.progress,
+        opts.kind,
+        opts.backend,
     )
     .await?;
     if let Some(root) = downloaded.huggingface_root.as_deref() {

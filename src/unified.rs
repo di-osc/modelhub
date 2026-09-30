@@ -992,8 +992,9 @@ pub async fn download_single_file(
 
 /// Download a repository, auto-detecting whether it is a model or a dataset.
 ///
-/// `file` selects a single repository file; `None` downloads the whole repo.
-/// `progress` toggles the progress bar.
+/// `kind`/`backend` narrow the detection: a known kind skips probing the other
+/// kind, a known backend skips probing the other backend. `progress` toggles the
+/// progress bar.
 #[allow(clippy::too_many_arguments)]
 pub async fn download_repo(
     repo_id: &str,
@@ -1002,8 +1003,9 @@ pub async fn download_repo(
     cache_root: &Path,
     concurrency: usize,
     allow_weight_mismatch: bool,
-    file: Option<&str>,
     progress: bool,
+    kind: Option<RepoKind>,
+    backend: Option<Backend>,
 ) -> anyhow::Result<DownloadedRepo> {
     let hf_client = huggingface_client()?;
     let ms_client = crate::modelscope::client::http_client()?;
@@ -1013,6 +1015,8 @@ pub async fn download_repo(
         repo_id,
         huggingface_revision,
         modelscope_revision,
+        kind,
+        backend,
     )
     .await?;
     download_loaded(
@@ -1026,7 +1030,6 @@ pub async fn download_repo(
         &ms_client,
         concurrency,
         allow_weight_mismatch,
-        file,
         progress,
     )
     .await
@@ -1038,35 +1041,68 @@ fn huggingface_client() -> anyhow::Result<reqwest::Client> {
         .build()?)
 }
 
-/// Quietly probe model and dataset manifests to decide what `repo_id` is.
+/// Quietly probe the selected manifests to decide what `repo_id` is.
 ///
 /// A repository that exists as both a model and a dataset is rejected so the
-/// caller does not have to guess which one was meant.
+/// caller does not have to guess which one was meant. `want_kind`/`want_backend`
+/// skip the corresponding probes entirely.
 async fn detect_manifests(
     hf_client: &reqwest::Client,
     ms_client: &reqwest::Client,
     repo_id: &str,
     huggingface_revision: &str,
     modelscope_revision: &str,
+    want_kind: Option<RepoKind>,
+    want_backend: Option<Backend>,
 ) -> anyhow::Result<(RepoKind, Option<Manifest>, Option<Manifest>)> {
-    let (model, dataset) = tokio::join!(
-        probe_manifests(
-            RepoKind::Model,
-            hf_client,
-            ms_client,
-            repo_id,
-            huggingface_revision,
-            modelscope_revision
+    let (model, dataset) = match want_kind {
+        Some(RepoKind::Model) => (
+            probe_manifests(
+                RepoKind::Model,
+                want_backend,
+                hf_client,
+                ms_client,
+                repo_id,
+                huggingface_revision,
+                modelscope_revision,
+            )
+            .await,
+            (None, None),
         ),
-        probe_manifests(
-            RepoKind::Dataset,
-            hf_client,
-            ms_client,
-            repo_id,
-            huggingface_revision,
-            modelscope_revision
-        )
-    );
+        Some(RepoKind::Dataset) => (
+            (None, None),
+            probe_manifests(
+                RepoKind::Dataset,
+                want_backend,
+                hf_client,
+                ms_client,
+                repo_id,
+                huggingface_revision,
+                modelscope_revision,
+            )
+            .await,
+        ),
+        None => tokio::join!(
+            probe_manifests(
+                RepoKind::Model,
+                want_backend,
+                hf_client,
+                ms_client,
+                repo_id,
+                huggingface_revision,
+                modelscope_revision
+            ),
+            probe_manifests(
+                RepoKind::Dataset,
+                want_backend,
+                hf_client,
+                ms_client,
+                repo_id,
+                huggingface_revision,
+                modelscope_revision
+            )
+        ),
+    };
     let (model_hf, model_ms) = model;
     let (dataset_hf, dataset_ms) = dataset;
     let model_found = model_hf.is_some() || model_ms.is_some();
@@ -1089,20 +1125,36 @@ async fn detect_manifests(
     );
 }
 
-/// Probe one kind on both backends, discarding error details.
+/// Probe one kind on the selected backends, discarding error details.
 async fn probe_manifests(
     kind: RepoKind,
+    backend: Option<Backend>,
     hf_client: &reqwest::Client,
     ms_client: &reqwest::Client,
     repo_id: &str,
     huggingface_revision: &str,
     modelscope_revision: &str,
 ) -> (Option<Manifest>, Option<Manifest>) {
-    let (hf, ms) = tokio::join!(
-        huggingface_manifest(hf_client, kind, repo_id, huggingface_revision),
-        modelscope_manifest(ms_client, kind, repo_id, modelscope_revision)
-    );
-    (hf.ok(), ms.ok())
+    let wanted = |candidate: Backend| backend.is_none_or(|want| want == candidate);
+    let hf = async {
+        if wanted(Backend::HuggingFace) {
+            huggingface_manifest(hf_client, kind, repo_id, huggingface_revision)
+                .await
+                .ok()
+        } else {
+            None
+        }
+    };
+    let ms = async {
+        if wanted(Backend::ModelScope) {
+            modelscope_manifest(ms_client, kind, repo_id, modelscope_revision)
+                .await
+                .ok()
+        } else {
+            None
+        }
+    };
+    tokio::join!(hf, ms)
 }
 
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
@@ -1117,7 +1169,6 @@ async fn download_loaded(
     ms_client: &reqwest::Client,
     concurrency: usize,
     allow_weight_mismatch: bool,
-    file: Option<&str>,
     progress: bool,
 ) -> anyhow::Result<DownloadedRepo> {
     if concurrency == 0 {
@@ -1135,13 +1186,6 @@ async fn download_loaded(
     }
     if let Some(manifest) = ms.as_ref() {
         paths.extend(manifest.files.keys().cloned());
-    }
-    let file = file.map(|file| file.trim_start_matches('/').to_owned());
-    if let Some(file) = file.as_deref() {
-        if !paths.contains(file) {
-            bail!("`{file}` is not present in {} `{repo_id}`", kind.label());
-        }
-        paths.retain(|path| path == file);
     }
     let mut plans = Vec::new();
     let mut git_comparisons = Vec::new();
@@ -1190,6 +1234,15 @@ async fn download_loaded(
     }
     let hf_root = hf.as_ref().map(|_| repo_root.join("huggingface"));
     let ms_root = ms.as_ref().map(|_| repo_root.join("modelscope"));
+    // A repository whose manifest lists no files still needs its backend root to
+    // exist, otherwise `ops::download` cannot link the empty snapshot into the
+    // native backend cache.
+    if let Some(root) = &hf_root {
+        fs::create_dir_all(root)?;
+    }
+    if let Some(root) = &ms_root {
+        fs::create_dir_all(root)?;
+    }
     let hf_snapshot_revision = hf.as_ref().map(|manifest| manifest.revision.clone());
     let ms_snapshot_revision = ms.as_ref().map(|manifest| manifest.revision.clone());
     let progress = progress_bar(progress, format!("{repo_id} • verifying and downloading"))?;
@@ -1230,31 +1283,6 @@ async fn download_loaded(
             add_separate(&mut plans, hf_file);
         }
     }
-    let file_path = match file.as_deref() {
-        Some(file)
-            if hf
-                .as_ref()
-                .is_some_and(|manifest| manifest.files.contains_key(file)) =>
-        {
-            let revision = hf_snapshot_revision
-                .as_deref()
-                .context("missing Hugging Face revision")?;
-            Some(safe_path(
-                &snapshot_root(&repo_root, Backend::HuggingFace, revision),
-                file,
-            )?)
-        }
-        Some(file) => {
-            let revision = ms_snapshot_revision
-                .as_deref()
-                .context("missing ModelScope revision")?;
-            Some(safe_path(
-                &snapshot_root(&repo_root, Backend::ModelScope, revision),
-                file,
-            )?)
-        }
-        None => None,
-    };
     let hf_client = Arc::new(hf_client.clone());
     let ms_client = Arc::new(ms_client.clone());
     let downloads = futures_util::stream::iter(plans.into_iter().map(|artifact| {
@@ -1303,17 +1331,13 @@ async fn download_loaded(
         fs::create_dir_all(&refs)?;
         fs::write(refs.join(huggingface_revision), &manifest.revision)?;
     }
-    // Only a full download yields a complete manifest; a single-file download
-    // stays unverifiable and reports `unknown` in `list --check`.
-    if file.is_none() {
-        write_repo_manifest(&repo_root, kind, hf.as_ref(), ms.as_ref())?;
-    }
+    write_repo_manifest(&repo_root, kind, hf.as_ref(), ms.as_ref())?;
     Ok(DownloadedRepo {
         kind,
         repo_root: repo_root.clone(),
         huggingface_root: hf_root,
         modelscope_root: ms_root,
-        file: file_path,
+        file: None,
     })
 }
 
