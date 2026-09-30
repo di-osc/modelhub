@@ -37,5 +37,8 @@ pub use repos::{CacheSource, RepoHit, RepoKind, RepoStatus};
 /// Result of [`download`].
 pub use unified::DownloadedRepo;
 
+/// Hub that hosts a repository.
+pub use unified::Backend;
+
 /// Types for [`upload`].
 pub use upload::{BackendUpload, UploadBackend, UploadCounts, UploadOptions, UploadSummary};

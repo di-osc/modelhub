@@ -17,22 +17,37 @@ pub use crate::repos::RepoKind;
 const HF_MIRROR: &str = "https://hf-mirror.com";
 const HF_OFFICIAL: &str = "https://huggingface.co";
 const DATASET_PAGE_SIZE: usize = 200;
+const MS_OFFICIAL: &str = "https://modelscope.cn";
 
 /// Records the files a completed download expects, so completeness can be
 /// verified offline.
 pub const MANIFEST_FILE: &str = ".modelhub-manifest.json";
 
+/// Hub that hosts a repository.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Backend {
+pub enum Backend {
+    /// Hugging Face hub.
     HuggingFace,
+    /// `ModelScope` hub.
     ModelScope,
 }
 
 impl Backend {
-    const fn segment(self) -> &'static str {
+    /// URL segment and cache directory name for this backend.
+    #[must_use]
+    pub const fn segment(self) -> &'static str {
         match self {
             Self::HuggingFace => "huggingface",
             Self::ModelScope => "modelscope",
+        }
+    }
+
+    /// Revision requested when the caller does not name one.
+    #[must_use]
+    pub const fn default_revision(self) -> &'static str {
+        match self {
+            Self::HuggingFace => "main",
+            Self::ModelScope => "master",
         }
     }
 }
@@ -306,6 +321,44 @@ fn hf_endpoints() -> Vec<String> {
     )
 }
 
+/// Base URL for `ModelScope` requests; `MODELSCOPE_ENDPOINT` overrides it.
+fn ms_base_url() -> String {
+    std::env::var("MODELSCOPE_ENDPOINT").map_or_else(
+        |_| MS_OFFICIAL.to_owned(),
+        |value| value.trim_end_matches('/').to_owned(),
+    )
+}
+
+/// Resolve URL for one file on one Hugging Face endpoint.
+#[allow(dead_code)] // wired into the single-file path by a later change
+fn huggingface_file_url(
+    endpoint: &str,
+    kind: RepoKind,
+    repo_id: &str,
+    revision: &str,
+    file: &str,
+) -> String {
+    format!(
+        "{endpoint}/{}/{}/resolve/{}/{}",
+        kind.segment(),
+        encode_path(repo_id),
+        encode_path(revision),
+        encode_path(file)
+    )
+}
+
+/// Single-file download URL on `ModelScope`.
+fn modelscope_file_url(kind: RepoKind, repo_id: &str, revision: &str, file: &str) -> String {
+    format!(
+        "{}/api/v1/{}/{}/repo?Revision={}&FilePath={}",
+        ms_base_url(),
+        kind.segment(),
+        repo_id,
+        urlencoding::encode(revision),
+        urlencoding::encode(file)
+    )
+}
+
 fn hf_auth(request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
     match std::env::var("HF_TOKEN").or_else(|_| std::env::var("HUGGINGFACE_HUB_TOKEN")) {
         Ok(token) => request.bearer_auth(token),
@@ -388,13 +441,7 @@ async fn modelscope_manifest(
                 size: file.size,
                 sha256: file.sha256.filter(|hash| !hash.is_empty()),
                 git_blob_id: None,
-                url: format!(
-                    "https://modelscope.cn/api/v1/{}/{}/repo?Revision={}&FilePath={}",
-                    kind.segment(),
-                    repo_id,
-                    urlencoding::encode(revision),
-                    urlencoding::encode(&path)
-                ),
+                url: modelscope_file_url(kind, repo_id, revision, &path),
                 path: path.clone(),
             };
             (path, remote)
@@ -415,7 +462,8 @@ async fn modelscope_list_files(
     match kind {
         RepoKind::Model => {
             let url = format!(
-                "https://modelscope.cn/api/v1/models/{repo_id}/repo/files?Recursive=true&Revision={}",
+                "{}/api/v1/models/{repo_id}/repo/files?Recursive=true&Revision={}",
+                ms_base_url(),
                 urlencoding::encode(revision)
             );
             let response = client.get(url).send().await?;
@@ -425,7 +473,8 @@ async fn modelscope_list_files(
             let mut all = Vec::new();
             for page in 1usize.. {
                 let url = format!(
-                    "https://modelscope.cn/api/v1/datasets/{repo_id}/repo/tree?Recursive=True&Revision={}&PageNumber={page}&PageSize={DATASET_PAGE_SIZE}",
+                    "{}/api/v1/datasets/{repo_id}/repo/tree?Recursive=True&Revision={}&PageNumber={page}&PageSize={DATASET_PAGE_SIZE}",
+                    ms_base_url(),
                     urlencoding::encode(revision)
                 );
                 let response = client.get(url).send().await?;
@@ -974,4 +1023,39 @@ async fn download_loaded(
         modelscope_root: ms_root,
         file: file_path,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn huggingface_file_url_encodes_each_segment() {
+        let url = huggingface_file_url(
+            "https://hf.example",
+            RepoKind::Dataset,
+            "org/name",
+            "main",
+            "data/a b.mp3",
+        );
+        assert_eq!(
+            url,
+            "https://hf.example/datasets/org/name/resolve/main/data/a%20b.mp3"
+        );
+    }
+
+    #[test]
+    fn modelscope_file_url_targets_one_file() {
+        let url = modelscope_file_url(RepoKind::Dataset, "org/name", "master", "data/a.mp3");
+        assert_eq!(
+            url,
+            "https://modelscope.cn/api/v1/datasets/org/name/repo?Revision=master&FilePath=data%2Fa.mp3"
+        );
+    }
+
+    #[test]
+    fn default_revisions_differ_per_backend() {
+        assert_eq!(Backend::HuggingFace.default_revision(), "main");
+        assert_eq!(Backend::ModelScope.default_revision(), "master");
+    }
 }
