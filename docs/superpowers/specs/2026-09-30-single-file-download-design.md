@@ -70,7 +70,8 @@ pub struct DownloadOptions {
    `kind` 已知 ? 1 : 2 乘 `backend` 已知 ? 1 : 2，最多 4）。先成功者赢，其余立即取消。
    全部失败 → 报错并列出尝试过的 URL。
    - ModelScope：`https://modelscope.cn/api/v1/{datasets|models}/{repo_id}/repo?Revision=...&FilePath=...`
-   - Hugging Face：`{endpoint}/{models|datasets}/{repo_id}/resolve/{revision}/{file}`
+   - Hugging Face：`{endpoint}/{repo_id}/resolve/{revision}/{file}`（dataset 加 `datasets/` 前缀；model 无前缀）。
+     实现中同时修正了一个既有 bug：整仓清单构造的 HF 文件地址此前对 model 也加了 `models/` 前缀，会 404。
 4. **落盘**：走现有 `materialize` 管线：staging → `blobs/sha256/<hash>` →
    hard-link 到快照路径。
 5. 不写 `.modelhub-manifest.json`，不链接任何原生缓存。

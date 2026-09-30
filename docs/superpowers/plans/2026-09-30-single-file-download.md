@@ -40,23 +40,38 @@ mod tests {
     use super::*;
 
     #[test]
-    fn huggingface_file_url_encodes_each_segment() {
-        let url = huggingface_file_url(
-            "https://hf.example",
-            RepoKind::Dataset,
-            "org/name",
-            "main",
-            "data/a b.mp3",
+    fn huggingface_file_url_uses_kind_specific_prefix() {
+        assert_eq!(
+            huggingface_file_url(
+                "https://hf.example",
+                RepoKind::Model,
+                "org/name",
+                "main",
+                "data/a b.mp3",
+            ),
+            "https://hf.example/org/name/resolve/main/data/a%20b.mp3"
         );
         assert_eq!(
-            url,
+            huggingface_file_url(
+                "https://hf.example",
+                RepoKind::Dataset,
+                "org/name",
+                "main",
+                "data/a b.mp3",
+            ),
             "https://hf.example/datasets/org/name/resolve/main/data/a%20b.mp3"
         );
     }
 
     #[test]
     fn modelscope_file_url_targets_one_file() {
-        let url = modelscope_file_url(RepoKind::Dataset, "org/name", "master", "data/a.mp3");
+        let url = modelscope_file_url(
+            MS_OFFICIAL,
+            RepoKind::Dataset,
+            "org/name",
+            "master",
+            "data/a.mp3",
+        );
         assert_eq!(
             url,
             "https://modelscope.cn/api/v1/datasets/org/name/repo?Revision=master&FilePath=data%2Fa.mp3"
@@ -141,10 +156,21 @@ const MS_OFFICIAL: &str = "https://modelscope.cn";
 ```rust
 /// Base URL for `ModelScope` requests; `MODELSCOPE_ENDPOINT` overrides it.
 fn ms_base_url() -> String {
-    std::env::var("MODELSCOPE_ENDPOINT").map_or_else(
-        |_| MS_OFFICIAL.to_owned(),
-        |value| value.trim_end_matches('/').to_owned(),
-    )
+    std::env::var("MODELSCOPE_ENDPOINT")
+        .ok()
+        .map(|value| value.trim().trim_end_matches('/').to_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| MS_OFFICIAL.to_owned())
+}
+
+/// URL path prefix for a repository kind on Hugging Face.
+///
+/// Models are served from the site root; datasets live under `datasets/`.
+fn hf_repo_prefix(kind: RepoKind) -> &'static str {
+    match kind {
+        RepoKind::Model => "",
+        RepoKind::Dataset => "datasets/",
+    }
 }
 
 /// Resolve URL for one file on one Hugging Face endpoint.
@@ -156,8 +182,8 @@ fn huggingface_file_url(
     file: &str,
 ) -> String {
     format!(
-        "{endpoint}/{}/{}/resolve/{}/{}",
-        kind.segment(),
+        "{endpoint}/{}{}/resolve/{}/{}",
+        hf_repo_prefix(kind),
         encode_path(repo_id),
         encode_path(revision),
         encode_path(file)
@@ -165,10 +191,12 @@ fn huggingface_file_url(
 }
 
 /// Single-file download URL on `ModelScope`.
-fn modelscope_file_url(kind: RepoKind, repo_id: &str, revision: &str, file: &str) -> String {
+///
+/// `base` is passed explicitly so callers and tests never depend on the
+/// environment behind `ms_base_url()`.
+fn modelscope_file_url(base: &str, kind: RepoKind, repo_id: &str, revision: &str, file: &str) -> String {
     format!(
-        "{}/api/v1/{}/{}/repo?Revision={}&FilePath={}",
-        ms_base_url(),
+        "{base}/api/v1/{}/{}/repo?Revision={}&FilePath={}",
         kind.segment(),
         repo_id,
         urlencoding::encode(revision),
@@ -192,7 +220,19 @@ fn modelscope_file_url(kind: RepoKind, repo_id: &str, revision: &str, file: &str
 替换为：
 
 ```rust
-                url: modelscope_file_url(kind, repo_id, revision, &path),
+                url: modelscope_file_url(&ms_base_url(), kind, repo_id, revision, &path),
+```
+
+把 `huggingface_manifest` 里 `RemoteFile` 的 `url` 字段内联构造替换为同一个 builder（这样整仓清单与单文件路径不会各写一份、再次跑偏）：
+
+```rust
+                            url: huggingface_file_url(
+                                &endpoint,
+                                kind,
+                                repo_id,
+                                &info.sha,
+                                &path,
+                            ),
 ```
 
 把 `modelscope_list_files` 的两个硬编码域名替换为 `ms_base_url()`：
@@ -761,7 +801,7 @@ fn unsafe_paths_fail_before_any_request() {
 fn missing_hints_probe_candidates_and_first_success_wins() {
     let root = temp_root("race");
     let mock = MockHub::start(vec![(
-        "/models/acme--demo/resolve/main/notes.txt".to_owned(),
+        "/acme--demo/resolve/main/notes.txt".to_owned(),
         200,
         b"hello".to_vec(),
     )]);
@@ -779,7 +819,7 @@ fn missing_hints_probe_candidates_and_first_success_wins() {
     assert!(
         requests
             .iter()
-            .any(|path| path == "/models/acme--demo/resolve/main/notes.txt")
+            .any(|path| path == "/acme--demo/resolve/main/notes.txt")
     );
     assert!(requests.len() <= 4);
     assert!(
@@ -823,7 +863,7 @@ fn single_file_urls(
             .into_iter()
             .map(|endpoint| huggingface_file_url(&endpoint, kind, repo_id, revision, file))
             .collect(),
-        Backend::ModelScope => vec![modelscope_file_url(kind, repo_id, revision, file)],
+        Backend::ModelScope => vec![modelscope_file_url(&ms_base_url(), kind, repo_id, revision, file)],
     }
 }
 
