@@ -190,6 +190,34 @@ fn cache_hit_via_huggingface_ref_skips_network() {
 }
 
 #[test]
+fn unsafe_huggingface_ref_is_ignored() {
+    let root = temp_root("bad-ref");
+    let repo = root.join("cache/models/acme--demo/huggingface");
+    fs::create_dir_all(repo.join("refs")).unwrap();
+    // Without the guard, `snapshots/../../../escape` resolves outside the
+    // repository root and this file would be returned with no network request.
+    fs::write(repo.join("refs/main"), b"../../../escape").unwrap();
+    // `snapshots/` must exist for the `..` components to resolve.
+    fs::create_dir_all(repo.join("snapshots")).unwrap();
+    let escaped = root.join("cache/models/escape/config.json");
+    fs::create_dir_all(escaped.parent().unwrap()).unwrap();
+    fs::write(&escaped, b"{}").unwrap();
+    let mock = MockHub::start(Vec::new());
+
+    with_hub(&mock, &root, || {
+        let mut options = single_file_options(&root, "config.json");
+        options.kind = Some(RepoKind::Model);
+        options.backend = Some(Backend::HuggingFace);
+        // The unsafe ref is ignored, so the request falls through to the
+        // network and fails against the mock instead of returning the escape.
+        assert!(run(&options).is_err());
+    });
+
+    assert!(!mock.requests().is_empty());
+    fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
 fn known_kind_and_backend_issue_exactly_one_request() {
     let root = temp_root("one-request");
     let mock = MockHub::start(vec![(
