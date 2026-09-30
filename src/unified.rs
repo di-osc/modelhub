@@ -402,7 +402,10 @@ async fn huggingface_manifest(
         match hf_auth(client.get(url)).send().await {
             Ok(response) if response.status().is_success() => {
                 let info = response.json::<HfInfo>().await?;
-                validate_repo_value("revision", &info.sha)?;
+                if let Err(error) = validate_repo_value("revision", &info.sha) {
+                    errors.push(format!("{endpoint}: {error}"));
+                    continue;
+                }
                 let files = info
                     .siblings
                     .into_iter()

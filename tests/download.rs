@@ -252,8 +252,10 @@ fn known_kind_and_backend_issue_exactly_one_request() {
         assert!(repo.join(".modelhub-layout").is_file());
         let blob = root.join("cache/blobs/sha256").join(sha256_hex(b"audio"));
         assert!(blob.is_file());
-        assert!(!root.join("ms-native/models/acme--demo").exists());
-        assert!(!root.join("hf-native/models--acme--demo").exists());
+        // A single-file download never links into the native caches, so neither
+        // native cache root is even created.
+        assert!(!root.join("ms-native").exists());
+        assert!(!root.join("hf-native").exists());
     });
 
     assert_eq!(mock.requests().len(), 1);
