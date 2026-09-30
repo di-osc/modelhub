@@ -605,7 +605,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 fn env_lock() -> MutexGuard<'static, ()> {
-    ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner())
+    ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 fn temp_root(name: &str) -> PathBuf {
@@ -754,7 +754,7 @@ fn cache_hit_returns_without_touching_the_network() {
 fn known_kind_and_backend_issue_exactly_one_request() {
     let root = temp_root("one-request");
     let mock = MockHub::start(vec![(
-        "/api/v1/datasets/acme--demo/repo?Revision=master&FilePath=data%2Fa.mp3".to_owned(),
+        "/api/v1/datasets/acme/demo/repo?Revision=master&FilePath=data%2Fa.mp3".to_owned(),
         200,
         b"audio".to_vec(),
     )]);
@@ -806,7 +806,7 @@ fn unsafe_paths_fail_before_any_request() {
 fn missing_hints_probe_candidates_and_first_success_wins() {
     let root = temp_root("race");
     let mock = MockHub::start(vec![(
-        "/acme--demo/resolve/main/notes.txt".to_owned(),
+        "/acme/demo/resolve/main/notes.txt".to_owned(),
         200,
         b"hello".to_vec(),
     )]);
@@ -824,7 +824,7 @@ fn missing_hints_probe_candidates_and_first_success_wins() {
     assert!(
         requests
             .iter()
-            .any(|path| path == "/acme--demo/resolve/main/notes.txt")
+            .any(|path| path == "/acme/demo/resolve/main/notes.txt")
     );
     assert!(requests.len() <= 4);
     assert!(
@@ -964,7 +964,7 @@ pub async fn download_single_file(
     let repo_root = |kind: RepoKind| cache_root.join(kind.segment()).join(repo_id.replace('/', "--"));
     for kind in &kinds {
         for backend in &backends {
-            let revision = revision.map_or_else(|| backend.default_revision(), str::to_owned);
+            let revision = revision.map_or_else(|| backend.default_revision().to_owned(), str::to_owned);
             let target = safe_path(&snapshot_root(&repo_root(*kind), *backend, &revision), file)?;
             if target.is_file() {
                 return Ok(single_file_result(*kind, *backend, repo_root(*kind), target));
@@ -974,7 +974,7 @@ pub async fn download_single_file(
     let mut candidates = Vec::new();
     for kind in &kinds {
         for backend in &backends {
-            let revision = revision.map_or_else(|| backend.default_revision(), str::to_owned);
+            let revision = revision.map_or_else(|| backend.default_revision().to_owned(), str::to_owned);
             for url in single_file_urls(*backend, *kind, repo_id, &revision, file) {
                 candidates.push((*kind, *backend, url));
             }
@@ -993,7 +993,7 @@ pub async fn download_single_file(
                 return Err(error);
             }
         };
-    let revision = revision.map_or_else(|| backend.default_revision(), str::to_owned);
+    let revision = revision.map_or_else(|| backend.default_revision().to_owned(), str::to_owned);
     let target = safe_path(&snapshot_root(&repo_root(kind), backend, &revision), file)?;
     link_artifact(&blob, &target)?;
     progress.finish_with_message(format!("✓ {repo_id} • downloaded {file}"));
@@ -1130,13 +1130,13 @@ fn whole_repo_with_kind_and_backend_skips_detection() {
     let root = temp_root("whole-hints");
     let mock = MockHub::start(vec![
         (
-            "/api/v1/models/acme--demo/repo/files?Recursive=true&Revision=master".to_owned(),
+            "/api/v1/models/acme/demo/repo/files?Recursive=true&Revision=master".to_owned(),
             200,
             br#"{"Success":true,"Data":{"Files":[{"Path":"config.json","Size":7,"Type":"blob"}]}}"#
                 .to_vec(),
         ),
         (
-            "/api/v1/models/acme--demo/repo?Revision=master&FilePath=config.json".to_owned(),
+            "/api/v1/models/acme/demo/repo?Revision=master&FilePath=config.json".to_owned(),
             200,
             br#"{"a":1}"#.to_vec(),
         ),
@@ -1172,12 +1172,12 @@ fn whole_repo_with_kind_probes_both_backends_for_that_kind_only() {
     let root = temp_root("whole-kind");
     let mock = MockHub::start(vec![
         (
-            "/api/datasets/acme--demo/revision/main?blobs=true".to_owned(),
+            "/api/datasets/acme/demo/revision/main?blobs=true".to_owned(),
             200,
             br#"{"sha":"abc123","siblings":[]}"#.to_vec(),
         ),
         (
-            "/api/v1/datasets/acme--demo/repo/tree?Recursive=True&Revision=master&PageNumber=1&PageSize=200".to_owned(),
+            "/api/v1/datasets/acme/demo/repo/tree?Recursive=True&Revision=master&PageNumber=1&PageSize=200".to_owned(),
             200,
             br#"{"Data":{"Files":[]}}"#.to_vec(),
         ),
@@ -1204,7 +1204,7 @@ fn whole_repo_with_kind_probes_both_backends_for_that_kind_only() {
 fn whole_repo_with_backend_probes_both_kinds_on_that_backend() {
     let root = temp_root("whole-backend");
     let mock = MockHub::start(vec![(
-        "/api/v1/datasets/acme--demo/repo/tree?Recursive=True&Revision=master&PageNumber=1&PageSize=200".to_owned(),
+        "/api/v1/datasets/acme/demo/repo/tree?Recursive=True&Revision=master&PageNumber=1&PageSize=200".to_owned(),
         200,
         br#"{"Data":{"Files":[]}}"#.to_vec(),
     )]);
