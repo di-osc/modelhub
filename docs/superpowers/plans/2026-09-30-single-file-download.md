@@ -1491,6 +1491,10 @@ git add src/unified.rs src/ops.rs tests/download.rs
 git commit -m "Narrow repository manifest probing with kind and backend hints"
 ```
 
+> **执行补记（review 后落地，以代码为准）：**
+> - 空清单的整仓下载此前不会创建 `huggingface`/`modelscope` 后端根目录，`ops::download` 的 `link_directory` 会因源目录不存在而失败；`download_loaded` 现在为每个存在的后端根目录 `create_dir_all`。
+> - 追加 `whole_repo_without_hints_probes_everything`（默认 4 路探测 + 1 次取文件，共 5 请求）与 `whole_repo_ambiguous_kind_is_rejected`（跨后端同时存在时报 `exists as both`）。
+
 ---
 
 ### Task 6: CLI `--repo-type` / `--backend`

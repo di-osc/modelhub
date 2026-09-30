@@ -68,7 +68,8 @@ pub struct DownloadOptions {
    还会读取整仓下载写下的本地 `refs/<revision>`（内容为 commit sha，且必须是安全相对路径），
    从而复用 `snapshots/<sha>` 里已有的文件——同样零网络。
 3. **未命中**：按已知维度收窄，并行对候选组合发单文件 GET（组合数 =
-   `kind` 已知 ? 1 : 2 乘 `backend` 已知 ? 1 : 2，最多 4）。先成功者赢，其余立即取消。
+   `kind` 已知 ? 1 : 2 乘 `backend` 已知 ? 1 : 2；Hugging Face 默认有镜像与官方两个
+   endpoint，实际 URL 数可能更多）。先成功者赢，其余立即取消。
    全部失败 → 报错并列出尝试过的 URL。
    - ModelScope：`https://modelscope.cn/api/v1/{datasets|models}/{repo_id}/repo?Revision=...&FilePath=...`
    - Hugging Face：`{endpoint}/{repo_id}/resolve/{revision}/{file}`（dataset 加 `datasets/` 前缀；model 无前缀）。
