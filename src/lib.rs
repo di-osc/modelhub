@@ -21,6 +21,7 @@ mod cache;
 mod huggingface;
 mod modelscope;
 mod ops;
+mod progress;
 mod repos;
 mod unified;
 mod upload;

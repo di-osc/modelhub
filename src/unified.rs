@@ -2,7 +2,7 @@
 
 use anyhow::{Context, bail};
 use futures_util::StreamExt;
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::ProgressBar;
 use serde::{Deserialize, Serialize};
 use sha1::Sha1;
 use sha2::{Digest, Sha256};
@@ -52,6 +52,15 @@ impl Backend {
         match self {
             Self::HuggingFace => "main",
             Self::ModelScope => "master",
+        }
+    }
+
+    /// Label used in user-facing messages.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::HuggingFace => "huggingface",
+            Self::ModelScope => "modelscope",
         }
     }
 }
@@ -399,40 +408,49 @@ async fn huggingface_manifest(
             encode_path(repo_id),
             encode_path(revision)
         );
-        match hf_auth(client.get(url)).send().await {
-            Ok(response) if response.status().is_success() => {
-                let info = response.json::<HfInfo>().await?;
-                if let Err(error) = validate_repo_value("revision", &info.sha) {
-                    errors.push(format!("{endpoint}: {error}"));
-                    continue;
-                }
-                let files = info
-                    .siblings
-                    .into_iter()
-                    .map(|file| {
-                        let is_lfs = file.lfs.is_some();
-                        let size = file.size.or_else(|| file.lfs.as_ref().map(|lfs| lfs.size));
-                        let sha256 = file.lfs.map(|lfs| lfs.sha256);
-                        let path = file.rfilename;
-                        let remote = RemoteFile {
-                            backend: Backend::HuggingFace,
-                            size: size.unwrap_or(0),
-                            sha256,
-                            git_blob_id: if is_lfs { None } else { file.blob_id },
-                            url: huggingface_file_url(&endpoint, kind, repo_id, &info.sha, &path),
-                            path: path.clone(),
-                        };
-                        (path, remote)
-                    })
-                    .collect();
-                return Ok(Manifest {
-                    revision: info.sha,
-                    files,
-                });
+        let response = match hf_auth(client.get(url)).send().await {
+            Ok(response) => response,
+            // No answer at all: the endpoint is unreachable, so the next one is
+            // worth trying.
+            Err(error) => {
+                errors.push(format!("{endpoint}: {error}"));
+                continue;
             }
-            Ok(response) => errors.push(format!("{endpoint}: HTTP {}", response.status())),
-            Err(error) => errors.push(format!("{endpoint}: {error}")),
+        };
+        // The mirror serves the whole Hub, so any HTTP status it returns is
+        // final; the official endpoint would add nothing.
+        if !response.status().is_success() {
+            errors.push(format!("{endpoint}: HTTP {}", response.status()));
+            break;
         }
+        let info = response.json::<HfInfo>().await?;
+        if let Err(error) = validate_repo_value("revision", &info.sha) {
+            errors.push(format!("{endpoint}: {error}"));
+            break;
+        }
+        let files = info
+            .siblings
+            .into_iter()
+            .map(|file| {
+                let is_lfs = file.lfs.is_some();
+                let size = file.size.or_else(|| file.lfs.as_ref().map(|lfs| lfs.size));
+                let sha256 = file.lfs.map(|lfs| lfs.sha256);
+                let path = file.rfilename;
+                let remote = RemoteFile {
+                    backend: Backend::HuggingFace,
+                    size: size.unwrap_or(0),
+                    sha256,
+                    git_blob_id: if is_lfs { None } else { file.blob_id },
+                    url: huggingface_file_url(&endpoint, kind, repo_id, &info.sha, &path),
+                    path: path.clone(),
+                };
+                (path, remote)
+            })
+            .collect();
+        return Ok(Manifest {
+            revision: info.sha,
+            files,
+        });
     }
     bail!("Hugging Face manifest failed: {}", errors.join("; "))
 }
@@ -595,8 +613,21 @@ fn digest_file(path: &Path, size: u64) -> anyhow::Result<(String, String)> {
     ))
 }
 
+/// Name the backend a file is actually fetched from, so the bar reflects the
+/// live source rather than every backend that hosts the repository.
+///
+/// The backend leads the message so a long repository id or path can only push
+/// the file name into the truncated tail, never the backend itself.
+fn announce_source(progress: &ProgressBar, repo_id: &str, remote: &RemoteFile) {
+    crate::progress::set_message(
+        progress,
+        format!("{} • {repo_id} • {}", remote.backend.label(), remote.path),
+    );
+}
+
 async fn materialize(
     remote: &RemoteFile,
+    repo_id: &str,
     cache_root: &Path,
     hf_client: &reqwest::Client,
     ms_client: &reqwest::Client,
@@ -612,6 +643,7 @@ async fn materialize(
         }
     }
     validate_repo_value("repository path", &remote.path)?;
+    announce_source(progress, repo_id, remote);
     let request = match remote.backend {
         Backend::HuggingFace => hf_auth(hf_client.get(&remote.url)),
         Backend::ModelScope => ms_client.get(&remote.url).header(
@@ -757,20 +789,19 @@ fn link_artifact(blob: &Path, target: &Path) -> anyhow::Result<()> {
         .with_context(|| format!("failed to materialize {}", target.display()))
 }
 
-/// Spinner shown while downloading, hidden when the caller disabled progress.
-fn progress_bar(enabled: bool, message: String) -> anyhow::Result<ProgressBar> {
-    let progress = if enabled {
-        ProgressBar::new_spinner()
-    } else {
-        ProgressBar::hidden()
-    };
-    progress.set_style(
-        ProgressStyle::default_spinner()
-            .template("{spinner:.cyan} {msg} • {decimal_bytes} • {decimal_bytes_per_sec}")?,
-    );
-    progress.set_message(message);
-    progress.enable_steady_tick(std::time::Duration::from_millis(100));
-    Ok(progress)
+/// Bytes a repository download is expected to transfer: the files resolved
+/// across backends (downloaded once and compared) plus the per-backend
+/// artifacts. Cache hits still count, so the bar reflects every planned byte.
+fn download_total(git_comparisons: &[(RemoteFile, RemoteFile)], plans: &[Artifact]) -> u64 {
+    let compared = git_comparisons
+        .iter()
+        .map(|(_, modelscope)| modelscope.size)
+        .sum::<u64>();
+    let planned = plans
+        .iter()
+        .map(|artifact| artifact.remote.size)
+        .sum::<u64>();
+    compared.saturating_add(planned)
 }
 
 fn snapshot_root(model_root: &Path, backend: Backend, revision: &str) -> PathBuf {
@@ -979,10 +1010,15 @@ pub async fn download_single_file(
     }
     let hf_client = huggingface_client()?;
     let ms_client = crate::modelscope::client::http_client()?;
-    let bar = progress_bar(progress, format!("{repo_id} • downloading {file}"))?;
+    let bar = crate::progress::bar(progress, format!("{repo_id} • {file}"), None);
     let outcome = async {
         let (kind, backend, _, response) =
             send_first_success(candidates, file, repo_id, &hf_client, &ms_client).await?;
+        crate::progress::set_message(&bar, format!("{} • {repo_id} • {file}", backend.label()));
+        if let Some(length) = response.content_length().filter(|length| *length > 0) {
+            bar.set_style(crate::progress::bar_style());
+            bar.set_length(length);
+        }
         let (blob, _, _) = stream_to_blob(backend, file, response, None, cache_root, &bar).await?;
         ensure_repo_markers(&repo_root(kind), repo_id)?;
         let revision =
@@ -1072,69 +1108,38 @@ async fn detect_manifests(
     want_kind: Option<RepoKind>,
     want_backend: Option<Backend>,
 ) -> anyhow::Result<(RepoKind, Option<Manifest>, Option<Manifest>)> {
-    let (model, dataset) = match want_kind {
-        Some(RepoKind::Model) => (
-            probe_manifests(
-                RepoKind::Model,
-                want_backend,
-                hf_client,
-                ms_client,
-                repo_id,
-                huggingface_revision,
-                modelscope_revision,
-            )
-            .await,
-            (None, None),
-        ),
-        Some(RepoKind::Dataset) => (
-            (None, None),
-            probe_manifests(
-                RepoKind::Dataset,
-                want_backend,
-                hf_client,
-                ms_client,
-                repo_id,
-                huggingface_revision,
-                modelscope_revision,
-            )
-            .await,
-        ),
-        None => tokio::join!(
-            probe_manifests(
-                RepoKind::Model,
-                want_backend,
-                hf_client,
-                ms_client,
-                repo_id,
-                huggingface_revision,
-                modelscope_revision
-            ),
-            probe_manifests(
-                RepoKind::Dataset,
-                want_backend,
-                hf_client,
-                ms_client,
-                repo_id,
-                huggingface_revision,
-                modelscope_revision
-            )
-        ),
-    };
-    let (model_hf, model_ms) = model;
-    let (dataset_hf, dataset_ms) = dataset;
-    let model_found = model_hf.is_some() || model_ms.is_some();
-    let dataset_found = dataset_hf.is_some() || dataset_ms.is_some();
-    if model_found && dataset_found {
-        bail!(
-            "`{repo_id}` exists as both a model and a dataset on supported backends; \
-             use a distinct repository ID"
-        );
+    // A model hit is final, so the dataset is probed only when the model probe
+    // misses (or the kind was hinted). This keeps a model download from waiting
+    // on a dataset probe that cannot change the outcome.
+    if want_kind.is_none_or(|kind| kind == RepoKind::Model) {
+        let (hf, ms) = probe_manifests(
+            RepoKind::Model,
+            want_backend,
+            hf_client,
+            ms_client,
+            repo_id,
+            huggingface_revision,
+            modelscope_revision,
+        )
+        .await;
+        if hf.is_some() || ms.is_some() {
+            return Ok((RepoKind::Model, hf, ms));
+        }
     }
-    if model_found {
-        return Ok((RepoKind::Model, model_hf, model_ms));
-    }
-    if dataset_found {
-        return Ok((RepoKind::Dataset, dataset_hf, dataset_ms));
+    if want_kind.is_none_or(|kind| kind == RepoKind::Dataset) {
+        let (hf, ms) = probe_manifests(
+            RepoKind::Dataset,
+            want_backend,
+            hf_client,
+            ms_client,
+            repo_id,
+            huggingface_revision,
+            modelscope_revision,
+        )
+        .await;
+        if hf.is_some() || ms.is_some() {
+            return Ok((RepoKind::Dataset, hf, ms));
+        }
     }
     bail!(
         "`{repo_id}` was not found as a model or a dataset on any supported backend; \
@@ -1260,10 +1265,14 @@ async fn download_loaded(
     }
     let hf_snapshot_revision = hf.as_ref().map(|manifest| manifest.revision.clone());
     let ms_snapshot_revision = ms.as_ref().map(|manifest| manifest.revision.clone());
-    let progress = progress_bar(progress, format!("{repo_id} • verifying and downloading"))?;
+    let total = download_total(&git_comparisons, &plans);
+    // The source backend is filled in per file by `announce_source`.
+    let progress = crate::progress::bar(progress, repo_id.to_owned(), Some(total));
     for (hf_file, ms_file) in git_comparisons {
-        let (blob, sha256, git) =
-            materialize(&ms_file, cache_root, hf_client, ms_client, &progress).await?;
+        let (blob, sha256, git) = materialize(
+            &ms_file, repo_id, cache_root, hf_client, ms_client, &progress,
+        )
+        .await?;
         let ms_target = safe_path(
             &snapshot_root(
                 &repo_root,
@@ -1295,6 +1304,7 @@ async fn download_loaded(
         } else if kind == RepoKind::Model && is_critical(&hf_file.path) && !allow_weight_mismatch {
             bail!("critical file differs across backends: {}", hf_file.path);
         } else {
+            progress.inc_length(hf_file.size);
             add_separate(&mut plans, hf_file);
         }
     }
@@ -1306,11 +1316,13 @@ async fn download_loaded(
         let hf_client = hf_client.clone();
         let ms_client = ms_client.clone();
         let progress = progress.clone();
+        let repo_id = repo_id.to_owned();
         let hf_revision = hf_snapshot_revision.clone();
         let ms_revision = ms_snapshot_revision.clone();
         async move {
             let (blob, _, _) = materialize(
                 &artifact.remote,
+                &repo_id,
                 &cache_root,
                 &hf_client,
                 &ms_client,
@@ -1408,6 +1420,38 @@ mod tests {
     fn default_revisions_differ_per_backend() {
         assert_eq!(Backend::HuggingFace.default_revision(), "main");
         assert_eq!(Backend::ModelScope.default_revision(), "master");
+    }
+
+    #[test]
+    fn backend_labels_are_stable() {
+        assert_eq!(Backend::HuggingFace.label(), "huggingface");
+        assert_eq!(Backend::ModelScope.label(), "modelscope");
+    }
+
+    #[test]
+    fn download_total_counts_compared_and_planned_files() {
+        let remote = |size| RemoteFile {
+            backend: Backend::HuggingFace,
+            path: "file".to_owned(),
+            size,
+            sha256: None,
+            git_blob_id: None,
+            url: String::new(),
+        };
+        // The comparison downloads the ModelScope copy once, then links it to
+        // Hugging Face, so only the ModelScope size counts.
+        let comparisons = [(remote(100), remote(200))];
+        let plans = [
+            Artifact {
+                remote: remote(300),
+                targets: vec![(Backend::HuggingFace, "file".to_owned())],
+            },
+            Artifact {
+                remote: remote(400),
+                targets: vec![(Backend::ModelScope, "file".to_owned())],
+            },
+        ];
+        assert_eq!(download_total(&comparisons, &plans), 900);
     }
 
     #[test]

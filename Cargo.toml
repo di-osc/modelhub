@@ -1,6 +1,6 @@
 [package]
 name = "modelhub"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/di-osc/modelhub"
@@ -11,6 +11,7 @@ anyhow = "1"
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 comfy-table = "8"
+console = "0.16"
 futures-util = "0.3"
 globset = "0.4"
 indicatif = "0.18"

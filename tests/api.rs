@@ -71,7 +71,7 @@ fn clear_reports_removals_through_the_public_api() {
     let summary = clear(&options).unwrap();
     assert!(summary.found);
     assert_eq!(summary.targets, vec![CacheSource::ModelHub]);
-    assert!(!summary.removed.is_empty());
+    assert_ne!(summary.removed.len(), 0);
     assert!(!modelhub_root.join("models").join("acme--demo").exists());
 
     fs::remove_dir_all(&root).unwrap();
@@ -92,7 +92,7 @@ fn async_operations_are_exported() {
     );
     assert!(options.create);
     assert_eq!(options.kind, modelhub::RepoKind::Dataset);
-    assert!(options.backends.is_empty());
+    assert_eq!(options.backends.len(), 0);
 
     let mut download = modelhub::DownloadOptions::new("acme/demo");
     download.kind = Some(modelhub::RepoKind::Dataset);

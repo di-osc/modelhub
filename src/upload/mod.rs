@@ -365,19 +365,11 @@ pub(crate) fn upload_progress(
     repo_id: &str,
     total: u64,
 ) -> indicatif::ProgressBar {
-    use indicatif::{ProgressBar, ProgressStyle};
-    let bar = if enabled {
-        ProgressBar::new(total)
-    } else {
-        ProgressBar::hidden()
-    };
-    if let Ok(style) = ProgressStyle::default_bar().template(
-        "{spinner:.cyan} {msg} [{wide_bar:.cyan/blue}] {decimal_bytes}/{decimal_total_bytes} • {decimal_bytes_per_sec}",
-    ) {
-        bar.set_style(style.progress_chars("━━─"));
-    }
-    bar.set_message(format!("{} • {repo_id}", backend.label()));
-    bar
+    crate::progress::bar(
+        enabled,
+        format!("{} • {repo_id}", backend.label()),
+        Some(total),
+    )
 }
 
 /// Validate that a repository path never escapes the repository root.
@@ -401,9 +393,17 @@ pub(crate) fn split_repo_id(repo_id: &str) -> Result<(&str, &str)> {
 
 #[cfg(test)]
 mod tests {
-    use super::collect_files;
+    use super::{UploadBackend, collect_files, upload_progress};
     use std::fs;
     use std::path::PathBuf;
+
+    #[test]
+    fn upload_progress_tracks_the_total() {
+        let bar = upload_progress(true, UploadBackend::HuggingFace, "org/name", 4096);
+        assert_eq!(bar.length(), Some(4096));
+        let hidden = upload_progress(false, UploadBackend::HuggingFace, "org/name", 4096);
+        assert_eq!(hidden.length(), None);
+    }
 
     struct TempTree(PathBuf);
 
@@ -548,9 +548,9 @@ mod tests {
 
         // Scoping deletions to `sub` keeps `old.json`.
         let scoped = plan(&files, &hashes, &remote, Some("sub"), true);
-        assert!(scoped.orphans.is_empty());
+        assert_eq!(scoped.orphans.len(), 0);
         // Without `allow_delete` nothing is pruned.
         let no_delete = plan(&files, &hashes, &remote, None, false);
-        assert!(no_delete.orphans.is_empty());
+        assert_eq!(no_delete.orphans.len(), 0);
     }
 }

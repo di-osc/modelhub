@@ -160,7 +160,7 @@ fn cache_hit_returns_without_touching_the_network() {
         assert_eq!(downloaded.file.as_deref(), Some(cached.as_path()));
     });
 
-    assert!(mock.requests().is_empty());
+    assert_eq!(mock.requests().len(), 0);
     fs::remove_dir_all(&root).unwrap();
 }
 
@@ -185,7 +185,7 @@ fn cache_hit_via_huggingface_ref_skips_network() {
         assert_eq!(downloaded.file.as_deref(), Some(cached.as_path()));
     });
 
-    assert!(mock.requests().is_empty());
+    assert_eq!(mock.requests().len(), 0);
     fs::remove_dir_all(&root).unwrap();
 }
 
@@ -213,7 +213,7 @@ fn unsafe_huggingface_ref_is_ignored() {
         assert!(run(&options).is_err());
     });
 
-    assert!(!mock.requests().is_empty());
+    assert_ne!(mock.requests().len(), 0);
     fs::remove_dir_all(&root).unwrap();
 }
 
@@ -282,7 +282,7 @@ fn unsafe_paths_fail_before_any_request() {
         assert!(run(&options).is_err());
     });
 
-    assert!(mock.requests().is_empty());
+    assert_eq!(mock.requests().len(), 0);
     fs::remove_dir_all(&root).unwrap();
 }
 
@@ -424,7 +424,7 @@ fn whole_repo_with_backend_probes_both_kinds_on_that_backend() {
 }
 
 #[test]
-fn whole_repo_without_hints_probes_everything() {
+fn whole_repo_without_hints_stops_after_a_model_hit() {
     let root = temp_root("whole-default");
     let mock = MockHub::start(vec![
         (
@@ -456,13 +456,18 @@ fn whole_repo_without_hints_probes_everything() {
             .iter()
             .any(|path| path == "/api/models/acme/demo/revision/main?blobs=true")
     );
-    // Four detection probes (model/dataset × HF/ModelScope) plus one file.
-    assert_eq!(requests.len(), 5);
+    // Model probes on both backends, then one file. The dataset is never probed
+    // once the model is found.
+    assert!(
+        !requests.iter().any(|path| path.contains("/datasets/")),
+        "{requests:?}"
+    );
+    assert_eq!(requests.len(), 3);
     fs::remove_dir_all(&root).unwrap();
 }
 
 #[test]
-fn whole_repo_ambiguous_kind_is_rejected() {
+fn whole_repo_prefers_the_model_when_both_exist() {
     let root = temp_root("whole-ambiguous");
     let mock = MockHub::start(vec![
         (
@@ -480,10 +485,16 @@ fn whole_repo_ambiguous_kind_is_rejected() {
     with_hub(&mock, &root, || {
         let mut options = DownloadOptions::new("acme/demo");
         options.cache_root = root.join("cache");
-        let error = run(&options).unwrap_err().to_string();
-        assert!(error.contains("exists as both"), "{error}");
+        let downloaded = run(&options).unwrap();
+        assert_eq!(downloaded.kind, RepoKind::Model);
     });
 
+    // The model hit ends detection, so the dataset route is never requested.
+    let requests = mock.requests();
+    assert!(
+        !requests.iter().any(|path| path.contains("/datasets/")),
+        "{requests:?}"
+    );
     fs::remove_dir_all(&root).unwrap();
 }
 
@@ -501,7 +512,7 @@ fn unsafe_whole_repo_revision_fails_before_any_request() {
         assert!(run(&options).is_err());
     });
 
-    assert!(mock.requests().is_empty());
+    assert_eq!(mock.requests().len(), 0);
     fs::remove_dir_all(&root).unwrap();
 }
 
