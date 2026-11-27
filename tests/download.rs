@@ -40,6 +40,18 @@ struct MockHub {
 
 impl MockHub {
     fn start(routes: Vec<(String, u16, Vec<u8>)>) -> Self {
+        Self::start_with(move |stream, _, path| {
+            for (prefix, status, body) in &routes {
+                if path.starts_with(prefix.as_str()) {
+                    respond(stream, *status, body);
+                    return;
+                }
+            }
+            respond(stream, 404, b"missing");
+        })
+    }
+
+    fn start_with(handler: impl Fn(&mut TcpStream, &str, &str) + Send + Sync + 'static) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock hub");
         let address = format!(
             "http://{}",
@@ -47,13 +59,13 @@ impl MockHub {
         );
         let requests: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let recorded = Arc::clone(&requests);
-        let routes = Arc::new(routes);
+        let handler = Arc::new(handler);
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { continue };
                 let recorded = Arc::clone(&recorded);
-                let routes = Arc::clone(&routes);
-                std::thread::spawn(move || serve(stream, routes.as_slice(), &recorded));
+                let handler = Arc::clone(&handler);
+                std::thread::spawn(move || serve(stream, &*handler, &recorded));
             }
         });
         Self { address, requests }
@@ -64,7 +76,11 @@ impl MockHub {
     }
 }
 
-fn serve(mut stream: TcpStream, routes: &[(String, u16, Vec<u8>)], recorded: &Mutex<Vec<String>>) {
+fn serve(
+    mut stream: TcpStream,
+    handler: impl FnOnce(&mut TcpStream, &str, &str),
+    recorded: &Mutex<Vec<String>>,
+) {
     let mut request = Vec::new();
     let mut buffer = [0u8; 4096];
     loop {
@@ -82,20 +98,16 @@ fn serve(mut stream: TcpStream, routes: &[(String, u16, Vec<u8>)], recorded: &Mu
     let text = String::from_utf8_lossy(&request);
     let path = text.split_whitespace().nth(1).unwrap_or("/").to_owned();
     recorded.lock().unwrap().push(path.clone());
-    for (prefix, status, body) in routes {
-        if path.starts_with(prefix.as_str()) {
-            respond(&mut stream, *status, body);
-            return;
-        }
-    }
-    respond(&mut stream, 404, b"missing");
+    handler(&mut stream, &text, &path);
 }
 
 fn respond(stream: &mut TcpStream, status: u16, body: &[u8]) {
-    let reason = if status == 200 { "OK" } else { "Not Found" };
+    respond_with(stream, status, body.len(), "", body);
+}
+
+fn respond_with(stream: &mut TcpStream, status: u16, length: usize, headers: &str, body: &[u8]) {
     let head = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        body.len()
+        "HTTP/1.1 {status} Result\r\nContent-Length: {length}\r\nConnection: close\r\n{headers}\r\n"
     );
     let _ = stream.write_all(head.as_bytes());
     let _ = stream.write_all(body);
@@ -538,6 +550,231 @@ fn unsafe_huggingface_manifest_revision_is_rejected() {
     assert!(
         requests.iter().all(|path| !path.contains("evil")),
         "{requests:?}"
+    );
+    fs::remove_dir_all(&root).unwrap();
+}
+
+fn request_header<'a>(request: &'a str, name: &str) -> Option<&'a str> {
+    request.lines().find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        key.eq_ignore_ascii_case(name).then_some(value.trim())
+    })
+}
+
+#[test]
+fn interrupted_single_file_resumes_or_restarts_safely() {
+    const OLD_TAG: &str = "ETag: \"v1\"\r\n";
+    const NEW_TAG: &str = "ETag: \"v2\"\r\n";
+    let cases = [
+        (
+            206,
+            "Content-Range: bytes 3-5/6\r\n",
+            &b"def"[..],
+            &b"abcdef"[..],
+            false,
+        ),
+        (200, NEW_TAG, &b"uvwxyz"[..], &b"uvwxyz"[..], false),
+        (
+            206,
+            "Content-Range: bytes 2-5/6\r\n",
+            &b"wxyz"[..],
+            &b"uvwxyz"[..],
+            true,
+        ),
+        (
+            206,
+            "Content-Range: bytes 3-5/6\r\nETag: \"v2\"\r\n",
+            &b"xyz"[..],
+            &b"uvwxyz"[..],
+            true,
+        ),
+        (
+            416,
+            "Content-Range: bytes */3\r\n",
+            &b""[..],
+            &b"uvwxyz"[..],
+            true,
+        ),
+    ];
+
+    for (status, headers, range_body, expected, restarts) in cases {
+        let root = temp_root("single-resume");
+        let attempts = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&attempts);
+        let mock = MockHub::start_with(move |stream, request, _| {
+            let range = request_header(request, "range");
+            let if_range = request_header(request, "if-range");
+            let attempt = {
+                let mut seen = seen.lock().unwrap();
+                seen.push((range.map(str::to_owned), if_range.map(str::to_owned)));
+                seen.len()
+            };
+            match attempt {
+                // Announce six bytes and close the connection after three.
+                1 => respond_with(stream, 200, 6, OLD_TAG, b"abc"),
+                2 => respond_with(stream, status, range_body.len(), headers, range_body),
+                _ => respond_with(stream, 200, 6, NEW_TAG, b"uvwxyz"),
+            }
+        });
+        with_hub(&mock, &root, || {
+            let mut options = single_file_options(&root, "weights.bin");
+            options.kind = Some(RepoKind::Model);
+            options.backend = Some(Backend::HuggingFace);
+            assert!(run(&options).is_err());
+            let snapshot =
+                root.join("cache/models/acme--demo/huggingface/snapshots/main/weights.bin");
+            assert!(!snapshot.exists());
+
+            let result = run(&options).unwrap();
+            assert_eq!(result.file.as_deref(), Some(snapshot.as_path()));
+            assert_eq!(fs::read(&snapshot).unwrap(), expected);
+            assert_eq!(run(&options).unwrap().file, result.file);
+        });
+
+        let mut expected_requests = vec![
+            (None, None),
+            (Some("bytes=3-".to_owned()), Some("\"v1\"".to_owned())),
+        ];
+        if restarts {
+            expected_requests.push((None, None));
+        }
+        assert_eq!(*attempts.lock().unwrap(), expected_requests);
+        fs::remove_dir_all(&root).unwrap();
+    }
+}
+
+#[test]
+fn interrupted_whole_repo_validates_resumed_bytes_against_the_manifest() {
+    for prefix in [b"abc", b"old"] {
+        let root = temp_root("whole-resume");
+        let attempts = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&attempts);
+        let checksum = sha256_hex(b"abcdef");
+        let mock = MockHub::start_with(move |stream, request, path| {
+            if path.contains("/repo/files?") {
+                let manifest = format!(
+                    r#"{{"Success":true,"Data":{{"Files":[{{"Path":"weights.bin","Size":6,"Type":"blob","Sha256":"{checksum}"}}]}}}}"#
+                );
+                respond(stream, 200, manifest.as_bytes());
+                return;
+            }
+            let range = request_header(request, "range").map(str::to_owned);
+            let attempt = {
+                let mut seen = seen.lock().unwrap();
+                seen.push(range);
+                seen.len()
+            };
+            match attempt {
+                1 => respond_with(stream, 200, 6, "", prefix),
+                2 => respond_with(stream, 206, 3, "Content-Range: bytes 3-5/6\r\n", b"def"),
+                _ => respond(stream, 200, b"abcdef"),
+            }
+        });
+        with_hub(&mock, &root, || {
+            let mut options = DownloadOptions::new("acme/demo");
+            options.cache_root = root.join("cache");
+            options.kind = Some(RepoKind::Model);
+            options.backend = Some(Backend::ModelScope);
+            assert!(run(&options).is_err());
+            let snapshot =
+                root.join("cache/models/acme--demo/modelscope/snapshots/master/weights.bin");
+            assert!(!snapshot.exists());
+
+            assert!(run(&options).unwrap().modelscope_root.is_some());
+            assert_eq!(fs::read(&snapshot).unwrap(), b"abcdef");
+            assert_eq!(
+                fs::read(root.join("ms-native/models/acme--demo/snapshots/master/weights.bin"))
+                    .unwrap(),
+                b"abcdef"
+            );
+
+            // A complete blob still satisfies a later whole-repo download.
+            run(&options).unwrap();
+        });
+
+        let mut expected_requests = vec![None, Some("bytes=3-".to_owned())];
+        if prefix == b"old" {
+            expected_requests.push(None);
+        }
+        assert_eq!(*attempts.lock().unwrap(), expected_requests);
+        fs::remove_dir_all(&root).unwrap();
+    }
+}
+
+#[test]
+fn interrupted_single_file_without_a_strong_etag_restarts() {
+    let root = temp_root("weak-etag");
+    let attempts = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::clone(&attempts);
+    let mock = MockHub::start_with(move |stream, request, _| {
+        let mut seen = seen.lock().unwrap();
+        seen.push(request_header(request, "range").map(str::to_owned));
+        if seen.len() == 1 {
+            respond_with(stream, 200, 6, "ETag: W/\"v1\"\r\n", b"abc");
+        } else {
+            respond(stream, 200, b"uvwxyz");
+        }
+    });
+    with_hub(&mock, &root, || {
+        let mut options = single_file_options(&root, "weights.bin");
+        options.kind = Some(RepoKind::Model);
+        options.backend = Some(Backend::ModelScope);
+        assert!(run(&options).is_err());
+        let file = run(&options).unwrap().file.unwrap();
+        assert_eq!(fs::read(file).unwrap(), b"uvwxyz");
+    });
+    assert_eq!(*attempts.lock().unwrap(), [None, None]);
+    fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn interrupted_huggingface_download_resumes_across_a_redirect() {
+    // `hf-mirror.com` answers `resolve` requests with a redirect to the CDN,
+    // so the resume headers have to survive that hop.
+    let root = temp_root("redirect-resume");
+    let attempts = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::clone(&attempts);
+    let mock = MockHub::start_with(move |stream, request, path| {
+        if path.starts_with("/cdn/") {
+            let mut seen = seen.lock().unwrap();
+            seen.push((
+                request_header(request, "range").map(str::to_owned),
+                request_header(request, "if-range").map(str::to_owned),
+            ));
+            match seen.len() {
+                1 => respond_with(stream, 200, 6, "ETag: \"v1\"\r\n", b"abc"),
+                _ => respond_with(
+                    stream,
+                    206,
+                    3,
+                    "ETag: \"v1\"\r\nContent-Range: bytes 3-5/6\r\n",
+                    b"def",
+                ),
+            }
+            return;
+        }
+        respond_with(
+            stream,
+            302,
+            0,
+            "Location: /cdn/weights.bin\r\nETag: \"v1\"\r\n",
+            b"",
+        );
+    });
+    with_hub(&mock, &root, || {
+        let mut options = single_file_options(&root, "weights.bin");
+        options.kind = Some(RepoKind::Model);
+        options.backend = Some(Backend::HuggingFace);
+        assert!(run(&options).is_err());
+        let file = run(&options).unwrap().file.unwrap();
+        assert_eq!(fs::read(file).unwrap(), b"abcdef");
+    });
+    assert_eq!(
+        *attempts.lock().unwrap(),
+        [
+            (None, None),
+            (Some("bytes=3-".to_owned()), Some("\"v1\"".to_owned())),
+        ]
     );
     fs::remove_dir_all(&root).unwrap();
 }

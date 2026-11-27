@@ -8,10 +8,12 @@ use sha1::Sha1;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+
+mod transfer;
+use transfer::Transfer;
 
 pub use crate::repos::RepoKind;
 
@@ -19,8 +21,6 @@ const HF_MIRROR: &str = "https://hf-mirror.com";
 const HF_OFFICIAL: &str = "https://huggingface.co";
 const DATASET_PAGE_SIZE: usize = 200;
 
-/// Distinguishes concurrent staging files for the same repository path.
-static STAGING_COUNTER: AtomicU64 = AtomicU64::new(0);
 const MS_OFFICIAL: &str = "https://modelscope.cn";
 
 /// Records the files a completed download expects, so completeness can be
@@ -594,10 +594,21 @@ fn is_critical(path: &str) -> bool {
 }
 
 fn digest_file(path: &Path, size: u64) -> anyhow::Result<(String, String)> {
-    let mut reader = BufReader::new(fs::File::open(path)?);
-    let mut sha256 = Sha256::new();
+    let (mut sha256, mut git) = hashers(size);
+    hash_contents(fs::File::open(path)?, &mut sha256, &mut git)?;
+    Ok((
+        format!("{:x}", sha256.finalize()),
+        format!("{:x}", git.finalize()),
+    ))
+}
+
+fn hashers(size: u64) -> (Sha256, Sha1) {
     let mut git = Sha1::new();
     git.update(format!("blob {size}\0").as_bytes());
+    (Sha256::new(), git)
+}
+
+fn hash_contents(mut reader: impl Read, sha256: &mut Sha256, git: &mut Sha1) -> anyhow::Result<()> {
     let mut buffer = vec![0u8; 64 * 1024].into_boxed_slice();
     loop {
         let count = reader.read(&mut buffer)?;
@@ -607,10 +618,7 @@ fn digest_file(path: &Path, size: u64) -> anyhow::Result<(String, String)> {
         sha256.update(&buffer[..count]);
         git.update(&buffer[..count]);
     }
-    Ok((
-        format!("{:x}", sha256.finalize()),
-        format!("{:x}", git.finalize()),
-    ))
+    Ok(())
 }
 
 /// Name the backend a file is actually fetched from, so the bar reflects the
@@ -644,137 +652,33 @@ async fn materialize(
     }
     validate_repo_value("repository path", &remote.path)?;
     announce_source(progress, repo_id, remote);
-    let request = match remote.backend {
-        Backend::HuggingFace => hf_auth(hf_client.get(&remote.url)),
-        Backend::ModelScope => ms_client.get(&remote.url).header(
-            crate::modelscope::client::USER_AGENT.0,
-            crate::modelscope::client::USER_AGENT.1,
-        ),
-    };
-    let response = request.send().await?;
-    if !response.status().is_success() {
-        bail!(
-            "failed to download {}: HTTP {}",
-            remote.path,
-            response.status()
-        );
-    }
-    stream_to_blob(
+    let request = file_request(remote.backend, &remote.url, hf_client, ms_client);
+    Transfer::start(
+        request,
         remote.backend,
-        &remote.path,
-        response,
-        Some(remote),
+        &remote.url,
         cache_root,
-        progress,
+        Some(remote),
     )
+    .await
+    .with_context(|| format!("failed to download {}", remote.path))?
+    .finish(&remote.path, cache_root, progress)
     .await
 }
 
-/// Removes a staging file when dropped unless the download completed.
-struct StagingGuard {
-    path: PathBuf,
-    keep: bool,
-}
-
-impl Drop for StagingGuard {
-    fn drop(&mut self) {
-        if !self.keep {
-            let _ = fs::remove_file(&self.path);
-        }
-    }
-}
-
-/// Stream a response into staging, verify it, and move it into the
-/// content-addressed blob store.
-///
-/// `expected` carries the manifest checks for a repository download. A
-/// single-file download passes `None` and relies on the response's
-/// `Content-Length` instead. When neither a manifest size nor `Content-Length`
-/// is available (for example a chunked response), the Git prelude falls back to
-/// zero and a Git blob comparison will not match.
-async fn stream_to_blob(
+fn file_request(
     backend: Backend,
-    path: &str,
-    response: reqwest::Response,
-    expected: Option<&RemoteFile>,
-    cache_root: &Path,
-    progress: &ProgressBar,
-) -> anyhow::Result<(PathBuf, String, String)> {
-    let declared = response.content_length().filter(|length| *length > 0);
-    let staging_target = safe_path(&cache_root.join("staging").join(backend.segment()), path)?;
-    let staging_name = staging_target
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("download");
-    let staging = staging_target.with_file_name(format!(
-        "{staging_name}.{}.{}.part",
-        std::process::id(),
-        STAGING_COUNTER.fetch_add(1, Ordering::Relaxed)
-    ));
-    if let Some(parent) = staging.parent() {
-        fs::create_dir_all(parent)?;
+    url: &str,
+    hf_client: &reqwest::Client,
+    ms_client: &reqwest::Client,
+) -> reqwest::RequestBuilder {
+    match backend {
+        Backend::HuggingFace => hf_auth(hf_client.get(url)),
+        Backend::ModelScope => ms_client.get(url).header(
+            crate::modelscope::client::USER_AGENT.0,
+            crate::modelscope::client::USER_AGENT.1,
+        ),
     }
-    let mut guard = StagingGuard {
-        path: staging.clone(),
-        keep: false,
-    };
-    let expected_size = expected
-        .map(|remote| remote.size)
-        .filter(|size| *size > 0)
-        .or(declared);
-    let mut sha256 = Sha256::new();
-    let mut git = Sha1::new();
-    git.update(format!("blob {}\0", expected_size.unwrap_or(0)).as_bytes());
-    let mut written = 0u64;
-    {
-        let mut writer = BufWriter::new(fs::File::create(&staging)?);
-        let mut stream = response.bytes_stream();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk?;
-            written += chunk.len() as u64;
-            progress.inc(chunk.len() as u64);
-            sha256.update(&chunk);
-            git.update(&chunk);
-            writer.write_all(&chunk)?;
-        }
-        writer.flush()?;
-    }
-    if let Some(size) = expected_size
-        && written != size
-    {
-        bail!("incomplete download for {path}");
-    }
-    let sha256 = format!("{:x}", sha256.finalize());
-    let git = format!("{:x}", git.finalize());
-    if let Some(expected) = expected.and_then(|remote| remote.sha256.as_deref())
-        && expected != sha256
-    {
-        bail!("SHA-256 mismatch for {path}");
-    }
-    if let Some(expected) = expected.and_then(|remote| remote.git_blob_id.as_deref())
-        && expected != git
-    {
-        bail!("Git blob hash mismatch for {path}");
-    }
-    let blob = cache_root.join("blobs").join("sha256").join(&sha256);
-    if let Some(parent) = blob.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    if blob.exists() {
-        fs::remove_file(&staging)?;
-    } else if let Err(error) = fs::rename(&staging, &blob) {
-        // On Windows a concurrent download may have produced the same
-        // content-addressed blob between the existence check and the rename; in
-        // that case the already-complete blob wins and this staging file is
-        // discarded. Otherwise the rename error is real.
-        if blob.exists() {
-            fs::remove_file(&staging)?;
-        } else {
-            return Err(error.into());
-        }
-    }
-    guard.keep = true;
-    Ok((blob, sha256, git))
 }
 
 fn link_artifact(blob: &Path, target: &Path) -> anyhow::Result<()> {
@@ -784,9 +688,13 @@ fn link_artifact(blob: &Path, target: &Path) -> anyhow::Result<()> {
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::hard_link(blob, target)
-        .or_else(|_| fs::copy(blob, target).map(|_| ()))
-        .with_context(|| format!("failed to materialize {}", target.display()))
+    match fs::hard_link(blob, target) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(_) => fs::copy(blob, target)
+            .map(|_| ())
+            .with_context(|| format!("failed to materialize {}", target.display())),
+    }
 }
 
 /// Bytes a repository download is expected to transfer: the files resolved
@@ -873,37 +781,25 @@ async fn send_first_success(
     repo_id: &str,
     hf_client: &reqwest::Client,
     ms_client: &reqwest::Client,
-) -> anyhow::Result<(RepoKind, Backend, String, reqwest::Response)> {
+    cache_root: &Path,
+) -> anyhow::Result<(RepoKind, Backend, Transfer<'static>)> {
     let attempts = candidates.len().max(1);
-    let requests =
-        futures_util::stream::iter(candidates.into_iter().map(|(kind, backend, url)| {
-            let hf_client = hf_client.clone();
-            let ms_client = ms_client.clone();
-            async move {
-                let request = match backend {
-                    Backend::HuggingFace => hf_auth(hf_client.get(&url)),
-                    Backend::ModelScope => ms_client.get(&url).header(
-                        crate::modelscope::client::USER_AGENT.0,
-                        crate::modelscope::client::USER_AGENT.1,
-                    ),
-                };
-                let response = request
-                    .send()
-                    .await
-                    .map_err(|error| format!("{url}: {error}"))?;
-                if !response.status().is_success() {
-                    return Err(format!("{url}: HTTP {}", response.status()));
-                }
-                Ok((kind, backend, url, response))
-            }
-        }))
-        .buffer_unordered(attempts);
+    let requests = futures_util::stream::iter(candidates.into_iter().map(
+        |(kind, backend, url)| async move {
+            let request = file_request(backend, &url, hf_client, ms_client);
+            let transfer = Transfer::start(request, backend, &url, cache_root, None)
+                .await
+                .with_context(|| url)?;
+            Ok::<_, anyhow::Error>((kind, backend, transfer))
+        },
+    ))
+    .buffer_unordered(attempts);
     futures_util::pin_mut!(requests);
     let mut errors = Vec::new();
     while let Some(result) = requests.next().await {
         match result {
             Ok(winner) => return Ok(winner),
-            Err(error) => errors.push(error),
+            Err(error) => errors.push(format!("{error:#}")),
         }
     }
     bail!(
@@ -1012,14 +908,16 @@ pub async fn download_single_file(
     let ms_client = crate::modelscope::client::http_client()?;
     let bar = crate::progress::bar(progress, format!("{repo_id} • {file}"), None);
     let outcome = async {
-        let (kind, backend, _, response) =
-            send_first_success(candidates, file, repo_id, &hf_client, &ms_client).await?;
+        let (kind, backend, transfer) = send_first_success(
+            candidates, file, repo_id, &hf_client, &ms_client, cache_root,
+        )
+        .await?;
         crate::progress::set_message(&bar, format!("{} • {repo_id} • {file}", backend.label()));
-        if let Some(length) = response.content_length().filter(|length| *length > 0) {
+        if let Some(length) = transfer.size().filter(|length| *length > 0) {
             bar.set_style(crate::progress::bar_style());
             bar.set_length(length);
         }
-        let (blob, _, _) = stream_to_blob(backend, file, response, None, cache_root, &bar).await?;
+        let (blob, _, _) = transfer.finish(file, cache_root, &bar).await?;
         ensure_repo_markers(&repo_root(kind), repo_id)?;
         let revision =
             revision.map_or_else(|| backend.default_revision().to_owned(), str::to_owned);

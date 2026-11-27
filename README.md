@@ -35,6 +35,8 @@ modelhub download org/name data/train.parquet --repo-type dataset --backend mode
 
 `--repo-type` 与 `--backend` 同样可以用于整仓下载：只传其一时，只探测剩下那一个维度；都传时完全不探测。两个参数都可省略。
 
+下载中断后，使用相同参数和缓存目录重新运行命令即可。单文件和整仓下载都支持在同一来源上续传。续传需要服务端支持 HTTP Range，并提供强 ETag，或由整仓清单提供文件校验值。无法安全续传时会从头下载该文件。
+
 权重不一致时，默认只保留一份。`--all-backends` 会两边都留。
 
 列出 modelhub、ModelScope、Hugging Face 缓存里的模型和数据集（`KIND` 列区分）。`$HOME` 显示为 `~`。
