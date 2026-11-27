@@ -665,18 +665,17 @@ async fn upload_lfs_multipart(
     oid: &str,
     progress: &ProgressBar,
 ) -> Result<()> {
-    let mut parts: Vec<(u64, String)> = header
-        .as_object()
-        .map(|map| {
-            map.iter()
-                .filter_map(|(key, value)| {
-                    let number = key.parse::<u64>().ok()?;
-                    let url = value.as_str()?.to_owned();
-                    Some((number, url))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    let mut parts: Vec<(u64, String)> = match header.as_object() {
+        Some(map) => map
+            .iter()
+            .filter_map(|(key, value)| {
+                let number = key.parse::<u64>().ok()?;
+                let url = value.as_str()?.to_owned();
+                Some((number, url))
+            })
+            .collect(),
+        None => Vec::new(),
+    };
     parts.sort_by_key(|(number, _)| *number);
     if parts.is_empty() {
         bail!("LFS multipart response had no part URLs");
